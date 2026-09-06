@@ -250,6 +250,46 @@ const quoted = [];
 const inQuotes = (i) => quoted.some(([a, b]) => i > a && i < b);
 const unquote = (s) => s.replace(/^["']|["']$/g, '');
 const isVar = (s) => /\$\{?[A-Za-z_]/.test(s);
+// Split an argument list into SHELL WORDS, joining adjacent quoted and unquoted runs into one
+// word before the quotes come off. A regex alternation of quoted-span-or-\S+ split
+// `rm -f "$SP"/run*.log` into `"$SP"` and `/run*.log`, and that second fragment reads as an
+// absolute path to the filesystem root - a session cleaning its OWN scratch was denied in 3
+// bundles, while the identical command fully quoted or fully unquoted passed.
+function shellWords(text) {
+  const out = [];
+  let cur = '';
+  let q = null;
+  let started = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (q) {
+      if (c === q) q = null; else cur += c;
+      started = true;
+      continue;
+    }
+    if (c === '"' || c === "'") { q = c; started = true; continue; }
+    if (/\s/.test(c)) { if (started) { out.push(cur); cur = ''; started = false; } continue; }
+    cur += c; started = true;
+  }
+  if (started) out.push(cur);
+  return out;
+}
+// A variable assigned to a LITERAL earlier in the same command is not unknowable - `SP=/tmp/x`
+// then `rm -rf "$SP"/*` is judgeable, and reading it as unjudgeable is how a real out-of-tree
+// write would have walked through. Only literal values are taken; anything carrying another
+// expansion stays unresolved, and an unresolved variable is still never judged.
+const assigns = new Map();
+for (const a of command.matchAll(/(?:^|[;&|(\n]|\s)([A-Za-z_]\w*)=("[^"\n]*"|'[^'\n]*'|[^\s;|&()]*)/g)) {
+  const v = unquote(a[2]);
+  if (v && !/[$`]/.test(v)) assigns.set(a[1], v);
+}
+const expandVars = (t) => t.replace(/\$\{([A-Za-z_]\w*)\}|\$([A-Za-z_]\w*)/g,
+  (m, br, bare) => (assigns.has(br || bare) ? assigns.get(br || bare) : m));
+// A sed/perl SCRIPT is not a path: `sed -i '' '/^DIVIDER$/d' <file>` had its address form read as
+// an absolute path and denied (replayed: exit 2, while `'s/a/b/'` exit 0 - it is not explicit, so
+// it never reached the check). A leading-slash token whose body carries a regex metacharacter and
+// which ends in sed command letters is a script; `/abs/path` has no metacharacter and stays a path.
+const SED_SCRIPT = /^\/(?=[^/]*[\^$*+?\[\]\\.])[^/]*\/[a-zA-Z]*$/;
 
 // `cd` / `pushd` earlier in the command move the anchor for everything after them. A target
 // that cannot be followed (`cd -`, `cd $DIR`, a relative cd from an unknown place) makes the
@@ -270,7 +310,8 @@ function anchorAt(index) {
 // is resolved at all - an explicitly out-of-tree spelling (absolute, ~-rooted, reaching up with
 // `..`), or any relative path once a `cd` has moved the anchor. A bare relative path with the
 // anchor still at the project root is this project's own file - the case that must never block.
-function judge(raw, index, what) {
+function judge(rawIn, index, what) {
+  const raw = expandVars(rawIn);
   if (isVar(raw)) return; // an unexpanded variable - cannot judge, don't guess
   const base = anchorAt(index);
   const explicit = /^([~/]|\.\.[/\\])/.test(raw) || raw.includes('/../') || raw === '..';
@@ -278,13 +319,18 @@ function judge(raw, index, what) {
   const expanded = nativePath(expandTilde(raw));
   if (!path.isAbsolute(expanded) && base === null) return; // relative from an unknown anchor
   const abs = resolveTarget(expanded, base);
+  // A target whose own leading segment is a GLOB names no project, and the denial then built its
+  // remedy out of the fabricated name - 'finish YOUR side against the current behaviour of `*`'.
+  // Nothing can be handed off to a repo that cannot be named, so this passes rather than blocks.
+  if (/[*?\[]/.test(otherProjectName(abs))) return;
   // name the token the session wrote unless a cd moved it - then the resolved path says where it lands
   if (!allowed(abs)) block(what, explicit ? raw : abs);
 }
 const judgeAll = (list, index, what) => {
-  for (const tok of list.match(/"[^"]*"|'[^']*'|\S+/g) || []) {
+  for (const tok of shellWords(list)) {
     if (tok.startsWith('-')) continue; // a flag (or `--`), never a path
-    judge(unquote(tok), index, what);
+    if (!tok || SED_SCRIPT.test(tok)) continue; // an empty -i suffix, or a sed address form
+    judge(tok, index, what);
   }
 };
 

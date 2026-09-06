@@ -139,19 +139,34 @@ function proseOf(text) {
     .trim();
 }
 
-if (payload.hook_event_name === 'UserPromptSubmit') {
-  process.stdout.write(JSON.stringify({
-    hookSpecificOutput: {
-      hookEventName: 'UserPromptSubmit',
-      additionalContext:
+// The budget text, one copy for both routes that inject it.
+const BUDGET_TEXT =
         `Answer budget (baseline-interaction.md, house rule): at most 3 sentences plus bullet ` +
         `points, ~${BUDGET} characters of prose. Lead with the result and stop - no preamble, no ` +
         `restating the request, no listing what you considered, no caveat paragraph. Code, ` +
         `tables and command output are exempt and do not count. Write more ONLY if THIS message ` +
         `asked for depth, in ANY language (in detail / walk me through / write a plan; детально, ` +
         `покроково, розпиши); 'explain' by itself does ` +
-        `not - explanations are capped too, and short means plainer words, never compressed jargon.`,
-    },
+        `not - explanations are capped too, and short means plainer words, never compressed jargon. ` +
+        `House voice, same rule, same source: single dashes, never em-dashes, and single quotes in ` +
+        `prose - in the answer AND in an AskUserQuestion's own text, which no Stop hook reads.`;
+
+if (payload.hook_event_name === 'UserPromptSubmit') {
+  process.stdout.write(JSON.stringify({
+    hookSpecificOutput: { hookEventName: 'UserPromptSubmit', additionalContext: BUDGET_TEXT },
+  }));
+  process.exit(0);
+}
+
+// A COMPACTION rebuilds the context without the injection and emits no UserPromptSubmit, so the
+// budget simply disappears for the rest of the session: measured absent for 74 of 195 messages in
+// one session and 277 of 366 (75.7%) in another, where the close came in at 1.44x the hard cap -
+// all four compactMetadata.preservedMessages records carry preserved:false for the budget's uuid.
+// A co-installed plugin's banner WAS re-injected at every compaction, so this route is proven.
+// Any hook whose whole value is an INJECTION needs this wiring; a hook that only BLOCKS does not.
+if (payload.hook_event_name === 'SessionStart') {
+  process.stdout.write(JSON.stringify({
+    hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: BUDGET_TEXT },
   }));
   process.exit(0);
 }

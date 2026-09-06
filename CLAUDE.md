@@ -26,7 +26,11 @@ change made only inside a consuming project is throwaway (see Invariants).
 - `stack/CLAUDE.template.md` - the stack-neutral per-project skeleton (an authoring outline in a stripped comment plus a rules table to trim) that each
   consuming project's `CLAUDE.md` is filled in from; the working conventions ship separately in
   the `stack/rules/baseline-*.md` set. Content shipped to projects, not this repo's own file.
-- `stack/hooks/` - `guard-protected-force-push.js` + `guard-catastrophic-rm.js` (PreToolUse `Bash`) +
+- `stack/hooks/` - `guard-protected-force-push.js` + `guard-catastrophic-rm.js` (PreToolUse `Bash` - a recursive `rm`
+  of an unrecoverable target, and the git verbs that destroy a working tree with no reflog to recover
+  from: `checkout --` / `restore` / `reset --hard` / `clean -f`, blocked only when the tree is actually
+  dirty, so a clean checkout passes; the guard had zero git coverage and a destructive `git checkout --`
+  replayed exit 0 against every guard in the stack) +
   `guard-read-whole-file.js` (PreToolUse `Read` + `Bash` - the same dump routed through the shell) + `guard-unapproved-dispatch.js` (PreToolUse
   `Task|Agent` - blocks an `*-implementer` dispatch without the `<docs-path>/flow/APPROVAL` gate
   file the flows write on explicit user approval or an explicit AUTO waiver, and blocks a generic `general-purpose`/`claude` dispatch while that stamp is live; stamps older than 8h or older than the session are absent; also blocks an `Explore`/generic dispatch whose brief asks a SYMBOL question - callers, declaration site, resolved type - since a grep-shaped seat answers those by name-match and the built-in `Explore` loads none of the project's rules) +

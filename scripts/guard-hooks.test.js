@@ -353,6 +353,54 @@ test('guard-ungated-commit: nothing gated a push, and a quoted publish verb is s
   assert.equal(gateIn(dir, 'git commit -m "prep for git push"'), 2, 'and a dirty one fires the COMMIT gate, not the publish one');
 });
 
+test('guard-catastrophic-rm: git destroys a working tree too, and prose about it does not', () => {
+  // 225 lines with no occurrence of `git`: a destructive `git checkout --` replayed exit 0 against
+  // every guard in the stack. Gated on ACTUAL loss - a clean tree has nothing to destroy.
+  const dir = cleanRepo();
+  const rm = (command) => runIn('guard-catastrophic-rm.js', { tool_name: 'Bash', tool_input: { command } },
+    { env: { ...process.env, CLAUDE_PROJECT_DIR: dir }, cwd: dir }).status;
+
+  assert.equal(rm('git checkout -- .'), 0, 'a CLEAN tree has nothing to lose');
+  assert.equal(rm('git reset --hard'), 0, '... same');
+  fs.writeFileSync(path.join(dir, 'seed.txt'), 'changed\n');
+  fs.writeFileSync(path.join(dir, 'new.txt'), 'x\n');
+  assert.equal(rm('git checkout -- .'), 2, 'a dirty tree loses work with no reflog');
+  assert.equal(rm('git checkout .'), 2, 'the pathless spelling too');
+  assert.equal(rm('git restore seed.txt'), 2, 'and restore');
+  assert.equal(rm('git reset --hard HEAD'), 2, 'and reset --hard');
+  assert.equal(rm('git clean -fdx'), 2, 'and clean -fdx');
+  assert.equal(rm('git restore --staged seed.txt'), 0, 'unstaging destroys nothing');
+  assert.equal(rm('git checkout -b feature'), 0, 'a branch checkout is not a discard');
+  assert.equal(rm('git reset HEAD~1'), 0, 'a soft reset keeps the tree');
+  // a quoted span is data - denying it teaches the obfuscation that defeats the gate on a real one
+  assert.equal(rm('echo "run git reset --hard"'), 0, 'an echo quoting it invokes nothing');
+  assert.equal(rm("grep -o 'git checkout --' t.jsonl"), 0, 'nor does a grep pattern');
+  assert.equal(rm('git commit -m "undo the git reset --hard"'), 0, 'nor a commit message');
+  assert.equal(rm("cat > plan.md <<'EOF'\nThen: git clean -fdx\nEOF"), 0, 'nor a plan document');
+  assert.equal(rm('echo "careful" && git clean -fdx'), 2, 'but a real one after a prose mention still blocks');
+});
+
+test('guard-read-whole-file: the extension is judged against the PATH, not the whole line', () => {
+  // Every one of these was replayed as a false positive: GATED_EXT_ANY was tested against the WHOLE
+  // compound command at three sites, and the sweep test ran above the per-segment loop.
+  const big = BIG;
+  assert.equal(bash('guard-read-whole-file.js', `ls src/*.js && head -40 ${big}`), 0,
+    'an unrelated *.js glob in a SIBLING segment denies nothing');
+  assert.equal(bash('guard-read-whole-file.js', `grep -rn "x" --include='*.cs' . | head -20 && wc -l ${big}`), 0,
+    'a bounded grep beside a glob is not a dump');
+  assert.equal(bash('guard-read-whole-file.js', `find . -name "guard-read-whole-file.js" && grep -n "THRESHOLD" ${big} | head -20`), 0,
+    'an exact-filename find names ONE file - the know-the-name-not-the-path idiom its own denial used to advise');
+  assert.equal(bash('guard-read-whole-file.js', 'head -n 100000 notes.txt # about Foo.cs'), 0,
+    'a huge head of a NON-gated file is not gated by a .cs mention elsewhere');
+  assert.equal(bash('guard-read-whole-file.js', `python3 -c "print(open('notes.txt').read())" # Foo.cs`), 0,
+    'nor is a runtime read of one');
+  assert.equal(bash('guard-read-whole-file.js', `cat ${big} > /tmp/copy.js`), 0,
+    'a redirected dump never reaches the context');
+  // and the sweeps still block
+  assert.equal(bash('guard-read-whole-file.js', 'for f in src/*.cs; do cat -n "$f"; done'), 2, 'a loop still blocks');
+  assert.equal(bash('guard-read-whole-file.js', 'find . -name "*.cs" -exec cat {} +'), 2, 'a globbed find -exec cat still blocks');
+});
+
 test('guard-unapproved-dispatch: the stamp lifecycle', () => {
   const root = fs.mkdtempSync(path.join(TMP, 'proj-'));
   const gate = path.join(root, '.claude', 'docs', 'flow', 'APPROVAL');
@@ -574,6 +622,24 @@ test('guard-cross-project-write: the session\'s own scratch and the account dir 
   const home = os.homedir();
   if (home) assert.equal(w(path.join(home, '.claude', 'projects', 'p', 'memory', 'm.md')), 0, 'memory writes must keep working');
   assert.equal(w(path.join(path.dirname(repoRoot), 'some-other-repo', 'src', 'a.ts')), 2, 'a real sibling repo is still blocked');
+});
+
+test('guard-cross-project-write: the session cleaning its own scratch is not a cross-project write', () => {
+  // Every shape here was replayed as a false positive against a real session's own scratch.
+  // in-project on purpose: the defect was the TOKENIZER, which split `"$SP"/run*.log` into two
+  // words and read the second as a path at the filesystem root - so the target's real location is
+  // what the assertion has to isolate.
+  const sp = path.join(XP_ROOT, 'scratch');
+  assert.equal(xpBash(`SP=${sp}; rm -f "$SP"/run*.log`), 0,
+    'a quoted var with an unquoted suffix is ONE word - splitting it made `/run*.log` an absolute path (3 bundles)');
+  assert.equal(xpBash('rm -f "$SP"/run*.log'), 0, 'and an unresolved variable is never judged');
+  assert.equal(xpBash(`rm -f "${sp}/run.log"`), 0, 'the fully quoted spelling always passed - now all three agree');
+  assert.equal(xpBash("sed -i '' '/^DIVIDER$/d' notes.md"), 0, "a sed ADDRESS is a script, not a path");
+  assert.equal(xpBash("sed -i '' 's/a/b/' notes.md"), 0, 'as is a substitution');
+  assert.equal(xpBash('rm -f /run*.log'), 0, 'a target whose leading segment is a glob names no project to hand off to');
+  // and the real writes still block, including one the variable resolution now makes judgeable
+  assert.equal(xpBash(`sed -i 's/a/b/' ${XP_OTHER}/f.ts x`), 2, 'an in-place edit in another project');
+  assert.equal(xpBash(`D=${XP_OTHER}; rm -rf "$D"/x`), 2, 'a variable assigned a LITERAL out-of-tree path is judgeable');
 });
 
 test('guard-cross-project-write: prose describing a command is not a command', () => {
