@@ -47,7 +47,10 @@ if (!payload || typeof payload !== 'object') process.exit(0); // a JSON scalar/n
         const fs = require('fs');
         const path = require('path');
         const root = process.env.CLAUDE_PROJECT_DIR || payload.cwd || process.cwd();
-        const dir = path.join(root, docsRootEnv(), 'hook-blocks');
+        // resolve, NOT join: an ABSOLUTE CLAUDE_STACK_DOCS_PATH makes path.join('/a/b','/x/y')
+        // '/a/b/x/y', so every ledger row landed in a doubled path that nothing reads (measured
+        // across all ten guards). resolve honours an absolute value and still joins a relative one.
+        const dir = path.resolve(root, docsRootEnv(), 'hook-blocks');
         fs.mkdirSync(dir, { recursive: true });
         fs.appendFileSync(path.join(dir, `${payload.session_id || 'nosession'}.jsonl`), JSON.stringify({
           ts: new Date().toISOString(),
@@ -72,6 +75,17 @@ const DEPTH_RE = /\b(in detail|detailed|more detail|deep ?dive|in ?depth|elabora
 // a word boundary around a Cyrillic stem never matches, so these are matched as bare substrings
 // (stems only: 'детальн' covers детально / детальніше / детальный).
 const DEPTH_RE_CYR = /(детальн|докладн|подробн|розгорнут|развернут|покроков|пошагов|крок за кроком|шаг за шагом|розпиши|распиши|розбір|разбор|напиши план|повністю|полностью|поясни глибше|глибше|глубже)/i;
+
+// A first-person retraction of something this run already said. 'Sorry' alone is not one, and
+// neither is a correction the run is making to somebody else's work - the exemption is for the
+// disclosure the short answer would erase.
+const SELF_CORRECTION_RE = /\b(i (was|got) (wrong|mistaken|it wrong)|my (earlier|previous|last) (claim|statement|answer|read|number|assertion|verdict)|correcting (myself|my)|i need to correct|to correct (myself|what i)|retract(ing)? (that|my)|(that|this) was (wrong|incorrect) (of me|on my part)|earlier i (said|claimed|reported|told you))\b/i;
+// The report shapes this stack's own skills MANDATE. A field required by the output contract is
+// not the run's prose - cutting it makes the report non-conforming.
+// A MARKDOWN HEADING is required, not just the word: 'Recommendation first, then why' is the
+// house answer shape, so matching a bolded lead-in would have exempted almost every answer and
+// left the cap unenforced.
+const MANDATED_FIELD_RE = /^\s{0,3}#{2,6}\s+\S{0,40}?\b(verdict|findings?|protocol check|waste analysis|blockers?|material|minor|evidence|punch[- ]list|assumptions?|not[- ]stack|fill in)\b/im;
 
 // --- transcript tail (last ~512KB): the final assistant message and the user's last real turn ---
 function tailLines() {
@@ -136,19 +150,34 @@ function proseOf(text) {
     .trim();
 }
 
-if (payload.hook_event_name === 'UserPromptSubmit') {
-  process.stdout.write(JSON.stringify({
-    hookSpecificOutput: {
-      hookEventName: 'UserPromptSubmit',
-      additionalContext:
+// The budget text, one copy for both routes that inject it.
+const BUDGET_TEXT =
         `Answer budget (baseline-interaction.md, house rule): at most 3 sentences plus bullet ` +
         `points, ~${BUDGET} characters of prose. Lead with the result and stop - no preamble, no ` +
         `restating the request, no listing what you considered, no caveat paragraph. Code, ` +
         `tables and command output are exempt and do not count. Write more ONLY if THIS message ` +
         `asked for depth, in ANY language (in detail / walk me through / write a plan; детально, ` +
         `покроково, розпиши); 'explain' by itself does ` +
-        `not - explanations are capped too, and short means plainer words, never compressed jargon.`,
-    },
+        `not - explanations are capped too, and short means plainer words, never compressed jargon. ` +
+        `House voice, same rule, same source: single dashes, never em-dashes, and single quotes in ` +
+        `prose - in the answer AND in an AskUserQuestion's own text, which no Stop hook reads.`;
+
+if (payload.hook_event_name === 'UserPromptSubmit') {
+  process.stdout.write(JSON.stringify({
+    hookSpecificOutput: { hookEventName: 'UserPromptSubmit', additionalContext: BUDGET_TEXT },
+  }));
+  process.exit(0);
+}
+
+// A COMPACTION rebuilds the context without the injection and emits no UserPromptSubmit, so the
+// budget simply disappears for the rest of the session: measured absent for 74 of 195 messages in
+// one session and 277 of 366 (75.7%) in another, where the close came in at 1.44x the hard cap -
+// all four compactMetadata.preservedMessages records carry preserved:false for the budget's uuid.
+// A co-installed plugin's banner WAS re-injected at every compaction, so this route is proven.
+// Any hook whose whole value is an INJECTION needs this wiring; a hook that only BLOCKS does not.
+if (payload.hook_event_name === 'SessionStart') {
+  process.stdout.write(JSON.stringify({
+    hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: BUDGET_TEXT },
   }));
   process.exit(0);
 }
@@ -176,6 +205,17 @@ if (payload.hook_event_name === 'Stop') {
   const body = proseOf(text);
   if (body.length <= HARD_CAP) process.exit(0);
   if (user && (DEPTH_RE.test(user) || DEPTH_RE_CYR.test(user))) process.exit(0); // depth asked this turn
+  // Two exemptions, both bought with measured damage: one forced re-answer went 3,184 -> 1,085
+  // chars and took TWO of five headline findings and a self-correction disclosure with it. A cap
+  // that deletes content the user needed is worse than the wall of text it replaced.
+  //   - A SELF-CORRECTION cannot be re-answered shorter without being dropped: the shorter answer
+  //     is, by construction, the one that does not mention the mistake.
+  //   - A MANDATED REPORT FIELD belongs to the skill's own output contract, not to the run's
+  //     talking. Trimming it makes the report non-conforming, which is a second failure.
+  // Both are deliberately narrow, and neither is reachable by a run that simply wants to write
+  // more: a bare 'sorry' does not match, and neither does a heading the stack does not mandate.
+  if (SELF_CORRECTION_RE.test(text)) process.exit(0);
+  if (MANDATED_FIELD_RE.test(text)) process.exit(0);
 
   process.stderr.write(
     `This answer is ${body.length} characters of prose - the house budget is ~${BUDGET} (about 3\n` +

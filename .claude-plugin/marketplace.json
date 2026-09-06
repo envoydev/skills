@@ -6,7 +6,7 @@
   },
   "metadata": {
     "description": "Claude Code agent stack - skills, agents, rules, hooks, and MCP servers, installed and updated via the claude-stack plugin.",
-    "version": "0.2.53"
+    "version": "0.2.55"
   },
   "plugins": [
     {

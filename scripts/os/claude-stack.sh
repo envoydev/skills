@@ -564,19 +564,33 @@ HOOKS=(
   "guard-read-whole-file.js::Read::"              # block whole-file Read of a >200-line source file - locate via serena first; caps cumulative half-split reconstruction
   "guard-read-whole-file.js::Bash::"              # same gate on Bash: a bare `cat file.ts` of a large source file is the Read block routed through the shell
   "guard-unapproved-dispatch.js::Task|Agent::"    # block *-implementer dispatch without the docs-root flow/APPROVAL gate file (APPROVED/AUTO)
-  "guard-ungated-commit.js::Bash::"               # block a non-trivial git commit without the docs-root flow/COMMIT-GATE receipt (VERIFIED/WAIVED)
+  "guard-ungated-commit.js::Bash::"               # block a non-trivial git commit without the docs-root flow/COMMIT-GATE receipt (VERIFIED/WAIVED), and a git push / gh pr merge without flow/PUSH-GATE (CLAUDE_STACK_PUSH_GATE=0 turns that half off)
   "guard-stop-contract.js::@Stop::"               # Stop event: block a turn ending on a decision-shaped question in prose - re-emit as AskUserQuestion (measured stalls 13min-37h); also carries the fresh-session offer, once per 1.5x of context growth past 40% of the window
-  "guard-fresh-session-start.js::Skill::"        # PreToolUse Skill: block a deliberate orchestration run starting on another run's carried history past ~150k ctx - route it through an AskUserQuestion fresh-session choice
+  "guard-stop-contract.js::AskUserQuestion::"  # PreToolUse AskUserQuestion: INJECT context into the ask being built - stale scope (an option naming repo/remote/job state with no fresh read this turn), a recommendation contradicting an un-actioned earlier prompt, the fresh-session offer for a flow whose every stop is a tool call, a live credential, and the house voice in the ask's own text. Presence only, never denies
+  "guard-fresh-session-start.js::Skill::"        # PreToolUse Skill: block a deliberate orchestration run starting on another run's carried history past the window-scaled trigger - route it through an AskUserQuestion fresh-session choice
+  "guard-fresh-session-start.js::@UserPromptSubmit::"   # the same run invoked as a SLASH COMMAND emits no Skill event at all (measured: 4 of 4 runs slash-injected, zero Skill events in 45 messages) - this route injects the ask, never denies (a UserPromptSubmit denial erases the prompt)
+  "guard-fresh-session-start.js::@SessionStart:compact::"  # the harness just auto-compacted, which proves the session hit the ~390k ceiling at a moment a Stop may never come - inject the fresh-session ask there too
   "guard-cross-project-write.js::Write|Edit|NotebookEdit|Bash::"  # one session, one project: block a WRITE that lands outside the project root (reads/investigation untouched) - the change another repo needs is handed off as a task card
   "guard-answer-length.js::@UserPromptSubmit::"   # inject the answer budget (~3 sentences plus points) at the end of the turn's context - the short-answer rule mechanized
+  "guard-answer-length.js::@SessionStart::"     # re-inject the budget after a COMPACTION rebuilds the context without it (measured absent for 277 of 366 messages in one session) - a startup/resume session gets it before the first prompt too
   "guard-answer-length.js::@Stop::"               # Stop event: block a wall-of-text answer (prose past the hard cap, no depth request in the user's message) - re-answer at budget
   "instrument-tool-usage.js::.*::"                # wired env-gated: a sh test skips the node spawn unless CLAUDE_STACK_INSTRUMENT=1 (seeded "0" in settings env - flip it for a measured run; see README)
 )
 
 # settings.json permissions.deny (claude-code): hard-block Read of secret-bearing files. Wired into
 # .claude/settings.json alongside the hooks on INSTALL (idempotent, union-merged - a consuming project's
-# own deny entries are preserved). Bare globs match at any depth (gitignore semantics), and Claude Code
-# applies a Read() deny to recognized Bash reads too (cat/head/tail/sed) - not to arbitrary subprocesses.
+# own deny entries are preserved). Bare globs match at any depth (gitignore semantics).
+# It reaches the Read TOOL ONLY. The claim that Claude Code also applies a Read() deny to recognized
+# Bash reads (cat/head/tail/sed) stood here for releases and is FALSE - refuted live: an account
+# carrying `Read(**/config.json)` returned the content of two Bash `cat`s of a config.json with zero
+# denial strings. A shell read of a denied file is not blocked by anything here; that route is
+# covered by baseline-security.md's behavioral rule and by the Stop-time credential branch in
+# guard-stop-contract.js.
+# The ACCOUNT settings.json is on this list because the stack's OWN design fills it with credentials
+# (CLAUDE.md and the setup walk both send SENTRY_ACCESS_TOKEN there, and CONTEXT7_API_KEY lives in an
+# env block too). A session cat-ed one whole as its FIRST tool call. The PROJECT-level settings.json
+# is deliberately NOT denied: it carries the hook wiring a session legitimately inspects, and the
+# tokens the stack directs anywhere are account-level.
 # Stack-specific secret/config globs stay a per-project addition (the CLAUDE.md template's authoring
 # outline prompts the fill-in; baseline-security.md keeps the behavioral rule).
 # The settings.json deny-list is a Claude Code feature (no equivalent elsewhere).
@@ -587,6 +601,10 @@ SECRET_DENY=(
   "Read(*.pfx)"
   "Read(*.p12)"
   "Read(*.key)"
+  "Read(~/.claude/settings.json)"
+  "Read(~/.claude/settings.local.json)"
+  "Read(~/.claude-*/settings.json)"
+  "Read(~/.claude-*/settings.local.json)"
 )
 
 # (5) Subagents (claude-code): specialist agents copied into .claude/agents/ from the run's source clone
@@ -1286,12 +1304,19 @@ for ev_name, entries in list(data.get("hooks", {}).items()):
     if not entries:
         del data["hooks"][ev_name]; changed = True
 # "@<Event>" matchers wire a non-PreToolUse lifecycle event (e.g. @Stop - no matcher key there).
+# "@<Event>:<matcher>" is the same with a matcher, which some events DO key on: SessionStart's
+# source (`compact` / `startup` / `resume`) is the one this stack uses. Without the matcher the
+# entry fires on every session start, which is not what the fresh-session offer is for.
 for matcher, command, legacy in specs:
     if matcher.startswith("@"):
-        ev = data.setdefault("hooks", {}).setdefault(matcher[1:], [])
-        if any(h.get("command", "") == command for e in ev for h in e.get("hooks", [])):
+        ev_name, _, ev_matcher = matcher[1:].partition(":")
+        ev = data.setdefault("hooks", {}).setdefault(ev_name, [])
+        if any(h.get("command", "") == command for e in ev for h in e.get("hooks", []) if e.get("matcher", "") == ev_matcher):
             continue
-        ev.append({"hooks": [{"type": "command", "command": command, "timeout": HOOK_TIMEOUT}]})
+        entry = {"hooks": [{"type": "command", "command": command, "timeout": HOOK_TIMEOUT}]}
+        if ev_matcher:
+            entry["matcher"] = ev_matcher
+        ev.append(entry)
         changed = True
         continue
     cur = data.setdefault("hooks", {}).setdefault("PreToolUse", [])
@@ -1334,6 +1359,14 @@ for _old, _new in (("CLAUDE_DOCS_PATH", "CLAUDE_STACK_DOCS_PATH"),):
         del env[_old]
         changed = True
         print("  settings.json env: %s renamed to %s" % (_old, _new))
+# Environment keys whose SEEDED DEFAULT turned out to be WRONG: clear the key when its value is
+# still exactly that seed - a value the user set by hand is theirs and is never touched. Same list
+# in both installer twins and in meta/migrations.json (the plugin route applies it from there).
+for _key, _bad_seed in (("CLAUDE_STACK_CONTEXT_WINDOW", "1000000"),):
+    if env.get(_key) == _bad_seed:
+        env[_key] = ""
+        changed = True
+        print("  settings.json env: %s cleared to auto-detect (the old seed declared a 1M window on every install)" % _key)
 # env: project-default auto-compact trigger (compact at ~40% of the context window). Set only when
 # absent, so a project that pins its own value - or holds CONTEXT7_API_KEY here - is never clobbered.
 if "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE" not in env:
@@ -1345,6 +1378,11 @@ if "CLAUDE_STACK_DOCS_PATH" not in env:
 # instrumentation switch: the wired instrument hook runs only when this is "1" - seeded off.
 if "CLAUDE_STACK_INSTRUMENT" not in env:
     env["CLAUDE_STACK_INSTRUMENT"] = "0"; changed = True
+# publish gate: `git push` / `gh pr merge` need a flow/PUSH-GATE receipt like a commit does.
+# Seeded ON - across four audited sessions every push and merge passed every guard, one of them
+# putting 40 files on a shared `develop`. "0" for a repo whose remote is already gated.
+if "CLAUDE_STACK_PUSH_GATE" not in env:
+    env["CLAUDE_STACK_PUSH_GATE"] = "1"; changed = True
 # fresh-session gate, BOTH of its knobs - seeded so they are visible and tunable in one place.
 # Until they were, the only percentage in the block was CLAUDE_AUTOCOMPACT_PCT_OVERRIDE, a
 # different knob (the harness auto-compact trigger); a user raised THAT to 40 and reasonably
@@ -1352,13 +1390,15 @@ if "CLAUDE_STACK_INSTRUMENT" not in env:
 # defaulted to 40 anyway, so the number matched while the setting did nothing).
 if "CLAUDE_STACK_FRESH_SESSION_PCT" not in env:
     env["CLAUDE_STACK_FRESH_SESSION_PCT"] = "40"; changed = True
-# The context window the percentage applies to, seeded "1000000" - a stated number, since an
-# empty box stays empty and the auto-detect fallback resolves on some machines only. On a 200k
-# model set "200000": the value outranks detection, so a declared 1M window on a 200k session
-# moves the trigger from 150k to 400k. Clearing it restores auto-detect (the hooks then read the
-# settings model id's window suffix, `opus[1m]`, else what the session has already carried).
+# The context window that percentage applies to - seeded EMPTY, which MEANS auto-detect. It was
+# seeded "1000000", and that killed the gate on every install that was not a 1M account: this
+# value is the FIRST layer of the hooks' window resolution, so a stated 1M window on a 200k
+# session put the trigger above anything that session can ever carry, and no offer could fire
+# (ten confirmations across four projects). Empty, the hooks read the settings model id's own
+# window suffix (`opus[1m]`), else the tier the session has already proven. Fill it in only to
+# OVERRULE that - "1000000" or "200000"; the box is written empty so it stays visible here.
 if "CLAUDE_STACK_CONTEXT_WINDOW" not in env:
-    env["CLAUDE_STACK_CONTEXT_WINDOW"] = "1000000"; changed = True
+    env["CLAUDE_STACK_CONTEXT_WINDOW"] = ""; changed = True
 if changed:
     json.dump(data, open(path, "w"), indent=2); open(path, "a").write("\n")
     print("  settings.json: hooks + secret deny-list + mcp allow-list + compact default ensured")
@@ -1384,6 +1424,13 @@ RETIRED_SKILLS=(project-task-flow project-task-cycle project-capabilities projec
 RETIRED_RULES=(baseline-agents-skills.md baseline-code-quality.md baseline-communication.md baseline-definition-of-done.md baseline-evaluating-proposals.md baseline-mcp-tools.md baseline-planning.md baseline-related-projects.md house-baseline.md web-conventions.md aspnet-conventions.md)
 RETIRED_HOOKS=(require-convention-skill.js inject-code-style.js)
 RETIRED_AGENTS=(angular-solution-designer.md angular-implementer.md angular-verifier.md mobile-solution-designer.md mobile-implementer.md mobile-verifier.md dotnet-windows-service-solution-designer.md dotnet-windows-service-implementer.md dotnet-windows-service-verifier.md code-analyzer.md issue-diagnoser.md)
+# MCP servers this stack no longer ships AT ALL. Empty today, and it is the mechanism that matters:
+# skills, agents, rules and hooks each got a retired list; MCPs never did, so a server the stack
+# dropped stayed registered in every existing install and kept injecting its tool schemas on every
+# session (measured: 24 playwright schemas re-injected into a headless backend project). A server
+# the stack still SHIPS but this project no longer needs is a different question - that is
+# /claude-stack:validate's whole-stack-absent pass, not a retirement.
+RETIRED_MCPS=()
 
 remove_skills() {  # rm -rf each manifest skill under the scope dest, so update starts from a clean slate
   local dest entry name
@@ -1444,8 +1491,17 @@ update_plugins() {
   done
 }
 
+prune_retired_mcps() {  # UPDATE: unregister the known retired server names (RETIRED_MCPS above)
+  local name
+  for name in ${RETIRED_MCPS[@]+"${RETIRED_MCPS[@]}"}; do
+    claude mcp remove "$name" -s "$CLAUDE_SCOPE" >/dev/null 2>&1 && log "  mcp pruned (retired upstream): $name"
+  done
+  return 0
+}
+
 update_mcps() {
   command -v claude >/dev/null 2>&1 || { CLAUDE_MISSING=true; return 0; }   # fail-soft: skip, never abort the run
+  prune_retired_mcps
   # Only the @latest entries (chrome-devtools, appium-mcp) float at launch; the pinned ones (playwright,
   # serena, memory, context7 when local) bump here via remove + re-add. angular-cli stays unpinned by
   # design; the hosted servers (context7 remote, sentry) have nothing to pin.
@@ -1633,7 +1689,13 @@ if [ "$CONTEXT7_MODE" = "remote" ]; then
 fi
 if printf '%s\n' ${MCPS[@]+"${MCPS[@]}"} | grep -q '^sentry|'; then
   log "  - sentry reads SENTRY_SLUG (your org, or org/project) from $CONFIG_DIR/settings.json 'env' - seeded by --sentry-slug, or add it there by hand (a project-level settings.json does not reach .mcp.json)"
-  if [ "$SENTRY_AUTH" = "token" ]; then log "  - sentry auth is token: add SENTRY_ACCESS_TOKEN (a personal/org API token) to the same $CONFIG_DIR/settings.json 'env' yourself - or re-run with --sentry-auth oauth for the browser consent flow"
+  if [ "$SENTRY_AUTH" = "token" ]; then
+    log "  - sentry auth is token: add SENTRY_ACCESS_TOKEN (a personal/org API token) to the same $CONFIG_DIR/settings.json 'env' yourself - or re-run with --sentry-auth oauth for the browser consent flow"
+    # The token never goes through a chat, and not through a shell argument either (it would land in
+    # the history file). getpass reads it from the terminal without echoing; the file is written by
+    # this snippet, not by anything that can log the value.
+    log "      the token never travels through a chat, and does not belong in a shell argument. Paste it into this:"
+    log "      python3 -c \"import getpass,json,pathlib;f=pathlib.Path('$CONFIG_DIR/settings.json');d=json.loads(f.read_text() or '{}') if f.exists() else {};d.setdefault('env',{})['SENTRY_ACCESS_TOKEN']=getpass.getpass('token (not echoed): ');f.parent.mkdir(parents=True,exist_ok=True);f.write_text(json.dumps(d,indent=2))\""
   else log "  - sentry is registered with no header: the first use opens Sentry's consent flow in the browser via /mcp"; fi
 fi
 [ "$INSTALL_GITHUB_CLI" = true ] && log "  - run 'gh auth login' if gh is not yet authenticated (needed before PRs/issues)"
@@ -1658,11 +1720,12 @@ The same env block carries the fresh-session gate's two knobs (seeded, absent-on
 hand-edited value survives every update):
   CLAUDE_STACK_FRESH_SESSION_PCT   what share of the context window a session may carry before an
                                    orchestration run is offered a fresh one (default 40; 0 = off)
-  CLAUDE_STACK_CONTEXT_WINDOW      the window that percentage applies to (seeded 1000000). SET IT
-                                   TO 200000 ON A 200k MODEL - the value outranks detection, and a
-                                   declared 1M window moves the trigger from 150k to 400k. Clear
-                                   it for auto: the hooks read the settings model id's window
-                                   suffix ('opus[1m]'), else what the session has carried.
+  CLAUDE_STACK_CONTEXT_WINDOW      the window that percentage applies to - seeded EMPTY, which
+                                   means auto-detect: the hooks read the settings model id's
+                                   window suffix ('opus[1m]'), else the tier the session has
+                                   already proven. Fill it in ('1000000' / '200000') only to
+                                   overrule that; the value outranks every detection layer.
 On the auto-detected 200k tier the percentage is INERT below 76: the trigger keeps the measured
-150k floor, and 200k x 75% is still 150k. It bites on a 1M window, where 40% is 400k.
+150k floor, and 200k x 75% is still 150k. Above that tier it is capped at 250k, because the
+harness auto-compacts at ~390k and a trigger above that ceiling can never fire.
 GITIGNORE

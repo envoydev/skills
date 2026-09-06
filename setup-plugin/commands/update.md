@@ -16,11 +16,26 @@ itself, and `stamp-compare.js` computes the upstream delta - you orchestrate and
 Measured before this split, a model-driven walk grew the session ~40k tokens; keep the fast
 path near 10k by never reading files or output the steps below do not name.
 
-**This run needs NO conversation context.** When invoked inside a session already carrying real
-work, say so in one line and put the choice through AskUserQuestion - run here anyway vs run in
-a fresh session (recommended) - before anything downloads: the fast path itself is ~10k tokens,
-but at a long tail every one of its messages re-sends the whole session (measured: the same
-update cost 7.9M cache-read at a 518k-token tail, ~790x its own budget).
+## 0. Where to run it
+
+**This run needs NO conversation context**, so it is the cheapest thing in the stack to move.
+Before anything downloads, put the choice through AskUserQuestion - run here anyway vs run in a
+fresh session (recommended). The fast path is ~10k tokens on its own, but every one of its
+messages re-sends whatever this session already carries, so state THIS session's own per-message
+context (`input + cache_read + cache_creation` off the last assistant message) and the ~10k
+budget beside it. Never quote a figure measured in another session: the number that used to sit
+here was ~2x over on lifetime cache-read and ~4.8x over on the tail when it was next checked.
+
+Every answer names the next action, and this step is not done until one is taken:
+
+| answer | next action |
+|---|---|
+| fresh session | give the paste-ready one-liner, end the turn, run nothing |
+| run here | go to step 1 now |
+| not now | say what is owed and end the turn - do not download |
+
+If the user redirects mid-answer and this ask is displaced, re-offer it ONCE when the redirect
+is handled, then proceed on their answer.
 
 **ONE release archive is the entire download** - the shared contract lives at
 `${CLAUDE_PLUGIN_ROOT}/references/source-protocol.md`; read it first and hold the whole run to
@@ -96,7 +111,19 @@ environment plan, no question on this path: when sentry is installed, read the A
 close-out, with the file path - any of `SENTRY_SLUG` and (token mode) `SENTRY_ACCESS_TOKEN` still
 missing: the user adds them there by hand (`{ "env": { "SENTRY_SLUG": "<org>[/<project>]",
 "SENTRY_ACCESS_TOKEN": "<token>" } }`; never a project-level `.claude/settings.json`, its env does
-not reach `.mcp.json`), or runs `/claude-stack:configure`, whose sentry plan asks the slug. Then:
+not reach `.mcp.json`), or runs `/claude-stack:configure`, whose sentry plan asks the slug. The
+slug is not a secret and can be typed anywhere; the TOKEN never travels through the chat - offer
+this copy-ready command with that line, so the value goes from the user's clipboard into the file
+without passing through a transcript (it is not echoed, and it is not a shell argument either):
+
+```bash
+python3 -c "import getpass,json,pathlib;f=pathlib.Path('~/.claude/settings.json').expanduser();d=json.loads(f.read_text() or '{}') if f.exists() else {};d.setdefault('env',{})['SENTRY_ACCESS_TOKEN']=getpass.getpass('token (not echoed): ');f.parent.mkdir(parents=True,exist_ok=True);f.write_text(json.dumps(d,indent=2))"
+```
+
+On Windows: `$t = Read-Host 'token' -AsSecureString`, then write the same key with
+`ConvertFrom-SecureString -AsPlainText`. If the user pastes the token into the chat anyway, use it
+for what they asked and END THE TURN on the rotation ask - it is in the transcript on disk now, and
+that is their decision to make, not one to leave unsaid. Then:
 
 - The compare showed `stack/CLAUDE.template.md` modified -> reconcile the project's CLAUDE.md
   additively (step 6). Otherwise skip it without reading either file.
@@ -132,13 +159,13 @@ prune: .claude/rules/web-conventions.md (renamed upstream; typescript-convention
 ```
 
 On 'proceed': selection = installed, minus the confirmed prune list, plus the new names of
-renames; write `raw.json`, run `stack-select.js --selection raw.json --emit selection.txt
+renames; write `raw.json`, run `stack-select.js --selection "$TMP/raw.json" --emit "$TMP/selection.txt"
 --check`. A `required:` line (a dependency the new release introduced) is auto-kept and
 reported. An `unknown:` line is an upstream retirement the compare missed - already excluded
 from the emitted selection; add it to the prune list (an MCP simply drops out of the
 regenerated `.mcp.json`; name it in the report). Blockers stop the run with their fixes -
 never update past one; warnings are listed and passed. Then run the installer as in step 3 but
-with `--selection selection.txt` / `-Selection selection.txt` in place of the installed-only
+with `--selection "$TMP/selection.txt"` / `-Selection "$TMP/selection.txt"` in place of the installed-only
 flag.
 
 ## 5. Prune
@@ -176,6 +203,13 @@ cache was built over serena's own language-server directory: `SERENA_HOME=.seren
 serena-agent serena project index`. Never invoke it from this run - the skill is manual-only (`disable-model-invocation`), so a
 Skill call is blocked (measured: an update run tried and the harness refused it); the report
 line is the mechanism.
+
+**A next step that needs a USER ACTION in this session ends the turn in ONE AskUserQuestion.**
+A listed next step is a directive, and three of them shipped as prose in one session and all
+three were ignored. So: after the report, if any listed step is something the user must decide
+or run now - re-index serena, run a manual-only capture skill, restart for an MCP change, rotate
+a credential - put those steps through AskUserQuestion as the turn's last act, one option per
+step plus 'nothing now'. Steps that are purely informational stay in the report and end nothing.
 
 ## 8. Clean up the temp dir - ALWAYS
 Remove `$TMP` per `${CLAUDE_PLUGIN_ROOT}/references/source-protocol.md`, on EVERY exit path:

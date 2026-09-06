@@ -611,19 +611,33 @@ $Hooks = @(
   'guard-read-whole-file.js::Read::'              # block whole-file Read of a >200-line source file - locate via serena first; caps cumulative half-split reconstruction
   'guard-read-whole-file.js::Bash::'              # same gate on Bash: a bare `cat file.ts` of a large source file is the Read block routed through the shell
   'guard-unapproved-dispatch.js::Task|Agent::'    # block *-implementer dispatch without the docs-root flow/APPROVAL gate file (APPROVED/AUTO)
-  'guard-ungated-commit.js::Bash::'               # block a non-trivial git commit without the docs-root flow/COMMIT-GATE receipt (VERIFIED/WAIVED)
+  'guard-ungated-commit.js::Bash::'               # block a non-trivial git commit without the docs-root flow/COMMIT-GATE receipt (VERIFIED/WAIVED), and a git push / gh pr merge without flow/PUSH-GATE (CLAUDE_STACK_PUSH_GATE=0 turns that half off)
   'guard-stop-contract.js::@Stop::'               # Stop event: block a turn ending on a decision-shaped question in prose - re-emit as AskUserQuestion (measured stalls 13min-37h); also carries the fresh-session offer, once per 1.5x of context growth past 40% of the window
-  'guard-fresh-session-start.js::Skill::'        # PreToolUse Skill: block a deliberate orchestration run starting on another run's carried history past ~150k ctx - route it through an AskUserQuestion fresh-session choice
+  'guard-stop-contract.js::AskUserQuestion::'  # PreToolUse AskUserQuestion: INJECT context into the ask being built - stale scope (an option naming repo/remote/job state with no fresh read this turn), a recommendation contradicting an un-actioned earlier prompt, the fresh-session offer for a flow whose every stop is a tool call, a live credential, and the house voice in the ask's own text. Presence only, never denies
+  'guard-fresh-session-start.js::Skill::'        # PreToolUse Skill: block a deliberate orchestration run starting on another run's carried history past the window-scaled trigger - route it through an AskUserQuestion fresh-session choice
+  'guard-fresh-session-start.js::@UserPromptSubmit::'   # the same run invoked as a SLASH COMMAND emits no Skill event at all (measured: 4 of 4 runs slash-injected, zero Skill events in 45 messages) - this route injects the ask, never denies (a UserPromptSubmit denial erases the prompt)
+  'guard-fresh-session-start.js::@SessionStart:compact::'  # the harness just auto-compacted, which proves the session hit the ~390k ceiling at a moment a Stop may never come - inject the fresh-session ask there too
   'guard-cross-project-write.js::Write|Edit|NotebookEdit|Bash::'  # one session, one project: block a WRITE that lands outside the project root (reads/investigation untouched) - the change another repo needs is handed off as a task card
   'guard-answer-length.js::@UserPromptSubmit::'   # inject the answer budget (~3 sentences plus points) at the end of the turn's context - the short-answer rule mechanized
+  'guard-answer-length.js::@SessionStart::'     # re-inject the budget after a COMPACTION rebuilds the context without it (measured absent for 277 of 366 messages in one session) - a startup/resume session gets it before the first prompt too
   'guard-answer-length.js::@Stop::'               # Stop event: block a wall-of-text answer (prose past the hard cap, no depth request in the user's message) - re-answer at budget
   'instrument-tool-usage.js::.*::'                # wired env-gated: a sh test skips the node spawn unless CLAUDE_STACK_INSTRUMENT=1 (seeded '0' in settings env - flip it for a measured run; see README)
 )
 
 # settings.json permissions.deny (claude-code): hard-block Read of secret-bearing files. Wired into
 # .claude/settings.json alongside the hooks on INSTALL (idempotent, union-merged - a consuming project's
-# own deny entries are preserved). Bare globs match at any depth (gitignore semantics), and Claude Code
-# applies a Read() deny to recognized Bash reads too (cat/head/tail/sed) - not to arbitrary subprocesses.
+# own deny entries are preserved). Bare globs match at any depth (gitignore semantics).
+# It reaches the Read TOOL ONLY. The claim that Claude Code also applies a Read() deny to recognized
+# Bash reads (cat/head/tail/sed) stood here for releases and is FALSE - refuted live: an account
+# carrying `Read(**/config.json)` returned the content of two Bash `cat`s of a config.json with zero
+# denial strings. A shell read of a denied file is not blocked by anything here; that route is
+# covered by baseline-security.md's behavioral rule and by the Stop-time credential branch in
+# guard-stop-contract.js.
+# The ACCOUNT settings.json is on this list because the stack's OWN design fills it with credentials
+# (CLAUDE.md and the setup walk both send SENTRY_ACCESS_TOKEN there, and CONTEXT7_API_KEY lives in an
+# env block too). A session cat-ed one whole as its FIRST tool call. The PROJECT-level settings.json
+# is deliberately NOT denied: it carries the hook wiring a session legitimately inspects, and the
+# tokens the stack directs anywhere are account-level.
 # Stack-specific secret/config globs stay a per-project addition (the CLAUDE.md template's authoring
 # outline prompts the fill-in; baseline-security.md keeps the behavioral rule).
 # The settings.json deny-list is a Claude Code feature (no equivalent elsewhere).
@@ -634,6 +648,10 @@ $SecretDeny = @(
   'Read(*.pfx)'
   'Read(*.p12)'
   'Read(*.key)'
+  'Read(~/.claude/settings.json)'
+  'Read(~/.claude/settings.local.json)'
+  'Read(~/.claude-*/settings.json)'
+  'Read(~/.claude-*/settings.local.json)'
 )
 
 # (5) Subagents (claude-code): specialist agents copied into .claude/agents/ from the run's source
@@ -1427,12 +1445,19 @@ function Set-HookSettings {
     }
     if ($matcher.StartsWith('@')) {
       # "@<Event>" wires a non-PreToolUse lifecycle event (e.g. @Stop - no matcher key there).
-      $evName = $matcher.Substring(1)
+      # "@<Event>:<matcher>" is the same with a matcher, which some events DO key on: SessionStart's
+      # source (`compact` / `startup` / `resume`) is the one this stack uses. Without the matcher
+      # the entry fires on every session start, which is not what the fresh-session offer is for.
+      $evParts = $matcher.Substring(1) -split ':', 2
+      $evName = $evParts[0]
+      $evMatcher = if ($evParts.Count -ge 2) { $evParts[1] } else { '' }
       if (-not $data.hooks.PSObject.Properties[$evName]) { $data.hooks | Add-Member -NotePropertyName $evName -NotePropertyValue @() }
       $ev = @($data.hooks.$evName)
-      $evHave = @(foreach ($e in $ev) { foreach ($h in $e.hooks) { $h.command } })
-      if ($evHave -contains $cmd) { continue }
-      $ev += [pscustomobject]@{ hooks = @([pscustomobject]@{ type = 'command'; command = $cmd; timeout = $HookTimeout }) }
+      $evHave = @(foreach ($e in $ev) { foreach ($h in $e.hooks) { "$([string]$e.matcher)::$($h.command)" } })
+      if ($evHave -contains "$evMatcher::$cmd") { continue }
+      $evBlock = [pscustomobject]@{ hooks = @([pscustomobject]@{ type = 'command'; command = $cmd; timeout = $HookTimeout }) }
+      if ($evMatcher) { $evBlock | Add-Member -NotePropertyName matcher -NotePropertyValue $evMatcher }
+      $ev += $evBlock
       $data.hooks.$evName = $ev
       $changed = $true
       continue
@@ -1482,6 +1507,16 @@ function Set-HookSettings {
       Log "  settings.json env: $($pair.old) renamed to $($pair.new)"
     }
   }
+  # Environment keys whose SEEDED DEFAULT turned out to be WRONG: clear the key when its value is
+  # still exactly that seed - a value the user set by hand is theirs and is never touched. Same
+  # list in both installer twins and in meta/migrations.json (the plugin route applies it there).
+  foreach ($reset in @(@{ key = 'CLAUDE_STACK_CONTEXT_WINDOW'; seed = '1000000' })) {
+    if ($data.env.PSObject.Properties[$reset.key] -and [string]$data.env.($reset.key) -eq $reset.seed) {
+      $data.env.($reset.key) = ''
+      $changed = $true
+      Log "  settings.json env: $($reset.key) cleared to auto-detect (the old seed declared a 1M window on every install)"
+    }
+  }
   # env: project-default auto-compact trigger (compact at ~40% of the context window). Set only when
   # absent, so a project that pins its own value - or holds CONTEXT7_API_KEY here - is never clobbered.
   if (-not $data.env.PSObject.Properties['CLAUDE_AUTOCOMPACT_PCT_OVERRIDE']) {
@@ -1500,6 +1535,13 @@ function Set-HookSettings {
     $data.env | Add-Member -NotePropertyName CLAUDE_STACK_INSTRUMENT -NotePropertyValue '0'
     $changed = $true
   }
+  # publish gate: `git push` / `gh pr merge` need a flow/PUSH-GATE receipt like a commit does.
+  # Seeded ON - across four audited sessions every push and merge passed every guard, one of them
+  # putting 40 files on a shared `develop`. '0' for a repo whose remote is already gated.
+  if (-not $data.env.PSObject.Properties['CLAUDE_STACK_PUSH_GATE']) {
+    $data.env | Add-Member -NotePropertyName CLAUDE_STACK_PUSH_GATE -NotePropertyValue '1'
+    $changed = $true
+  }
   # fresh-session gate, BOTH of its knobs - seeded so they are visible and tunable in one place.
   # Until they were, the only percentage in the block was CLAUDE_AUTOCOMPACT_PCT_OVERRIDE, a
   # different knob (the harness auto-compact trigger); a user raised THAT to 40 and reasonably
@@ -1509,13 +1551,15 @@ function Set-HookSettings {
     $data.env | Add-Member -NotePropertyName CLAUDE_STACK_FRESH_SESSION_PCT -NotePropertyValue '40'
     $changed = $true
   }
-  # The context window the percentage applies to, seeded '1000000' - a stated number, since an
-  # empty box stays empty and the auto-detect fallback resolves on some machines only. On a 200k
-  # model set '200000': the value outranks detection, so a declared 1M window on a 200k session
-  # moves the trigger from 150k to 400k. Clearing it restores auto-detect (the hooks then read the
-  # settings model id's window suffix, `opus[1m]`, else what the session has already carried).
+  # The context window that percentage applies to - seeded EMPTY, which MEANS auto-detect. It was
+  # seeded '1000000', and that killed the gate on every install that was not a 1M account: this
+  # value is the FIRST layer of the hooks' window resolution, so a stated 1M window on a 200k
+  # session put the trigger above anything that session can ever carry, and no offer could fire
+  # (ten confirmations across four projects). Empty, the hooks read the settings model id's own
+  # window suffix (`opus[1m]`), else the tier the session has already proven. Fill it in only to
+  # OVERRULE that - '1000000' or '200000'; the box is written empty so it stays visible here.
   if (-not $data.env.PSObject.Properties['CLAUDE_STACK_CONTEXT_WINDOW']) {
-    $data.env | Add-Member -NotePropertyName CLAUDE_STACK_CONTEXT_WINDOW -NotePropertyValue '1000000'
+    $data.env | Add-Member -NotePropertyName CLAUDE_STACK_CONTEXT_WINDOW -NotePropertyValue ''
     $changed = $true
   }
   if ($changed) {
@@ -1549,6 +1593,13 @@ $RetiredSkills = @('project-task-flow', 'project-task-cycle', 'project-capabilit
 $RetiredRules = @('baseline-agents-skills.md', 'baseline-code-quality.md', 'baseline-communication.md', 'baseline-definition-of-done.md', 'baseline-evaluating-proposals.md', 'baseline-mcp-tools.md', 'baseline-planning.md', 'baseline-related-projects.md', 'house-baseline.md', 'web-conventions.md', 'aspnet-conventions.md')
 $RetiredHooks = @('require-convention-skill.js', 'inject-code-style.js')
 $RetiredAgents = @('angular-solution-designer.md', 'angular-implementer.md', 'angular-verifier.md', 'mobile-solution-designer.md', 'mobile-implementer.md', 'mobile-verifier.md', 'dotnet-windows-service-solution-designer.md', 'dotnet-windows-service-implementer.md', 'dotnet-windows-service-verifier.md', 'code-analyzer.md', 'issue-diagnoser.md')
+# MCP servers this stack no longer ships AT ALL. Empty today, and it is the mechanism that matters:
+# skills, agents, rules and hooks each got a retired list; MCPs never did, so a server the stack
+# dropped stayed registered in every existing install and kept injecting its tool schemas on every
+# session (measured: 24 playwright schemas re-injected into a headless backend project). A server
+# the stack still SHIPS but this project no longer needs is a different question - that is
+# /claude-stack:validate's whole-stack-absent pass, not a retirement.
+$RetiredMcps = @()
 
 function Remove-Skills {
   # rm the manifest skills under the scope dest, so update starts from a clean slate.
@@ -1615,8 +1666,17 @@ function Update-Plugins {
   }
 }
 
+function Remove-RetiredMcps {
+  # UPDATE: unregister the known retired server names ($RetiredMcps above)
+  foreach ($name in $RetiredMcps) {
+    claude mcp remove $name -s $script:ClaudeScope 2>$null | Out-Null
+    if ($LASTEXITCODE -eq 0) { Write-Log "  mcp pruned (retired upstream): $name" }
+  }
+}
+
 function Update-Mcps {
   if (-not (Get-Command claude -ErrorAction SilentlyContinue)) { $script:ClaudeMissing = $true; return }   # fail-soft: skip, never abort
+  Remove-RetiredMcps
   # Only the @latest entries (chrome-devtools, appium-mcp) float at launch; the pinned ones (playwright,
   # serena, memory, context7 when local) bump here via remove + re-add. angular-cli stays unpinned by
   # design; the hosted servers (context7 remote, sentry) have nothing to pin.
@@ -1845,7 +1905,19 @@ if ($script:PrereqMissing) { Log '  - install the missing prerequisites flagged 
 if ($Context7 -eq 'remote') { Log "  - context7 is remote; add CONTEXT7_API_KEY to $ConfigDir\settings.json 'env' (the ACCOUNT file - a project-level one does not reach .mcp.json) for higher rate limits, or re-run with -Context7 local" }
 if (@($Mcps | Where-Object { $_ -like 'sentry|*' }).Count -gt 0) {
   Log "  - sentry reads SENTRY_SLUG (your org, or org/project) from $ConfigDir\settings.json 'env' - seeded by -SentrySlug, or add it there by hand (a project-level settings.json does not reach .mcp.json)"
-  if ($SentryAuth -eq 'token') { Log "  - sentry auth is token: add SENTRY_ACCESS_TOKEN (a personal/org API token) to the same $ConfigDir\settings.json 'env' yourself - or re-run with -SentryAuth oauth for the browser consent flow" }
+  if ($SentryAuth -eq 'token') {
+    Log "  - sentry auth is token: add SENTRY_ACCESS_TOKEN (a personal/org API token) to the same $ConfigDir\settings.json 'env' yourself - or re-run with -SentryAuth oauth for the browser consent flow"
+    # The token never goes through a chat, and not through a command argument either (it would land
+    # in the PSReadLine history file). Read-Host -AsSecureString takes it from the terminal without
+    # echoing it; the file is written by this snippet, not by anything that can log the value.
+    Log "      the token never travels through a chat, and does not belong in a command argument. Paste it into this:"
+    Log "      `$t = Read-Host 'token (not echoed)' -AsSecureString"
+    Log "      `$p = '$ConfigDir\settings.json'"
+    Log "      `$d = if (Test-Path `$p) { Get-Content `$p -Raw | ConvertFrom-Json } else { [pscustomobject]@{} }"
+    Log "      if (-not `$d.PSObject.Properties['env']) { `$d | Add-Member env ([pscustomobject]@{}) }"
+    Log "      `$d.env | Add-Member SENTRY_ACCESS_TOKEN (ConvertFrom-SecureString `$t -AsPlainText) -Force"
+    Log "      `$d | ConvertTo-Json -Depth 20 | Set-Content `$p"
+  }
   else { Log "  - sentry is registered with no header: the first use opens Sentry's consent flow in the browser via /mcp" }
 }
 if ($GitHubCli) { Log "  - run 'gh auth login' if gh is not yet authenticated (needed before PRs/issues)" }
@@ -1869,10 +1941,11 @@ Write-Host 'The same env block carries the fresh-session gate''s two knobs (seed
 Write-Host 'hand-edited value survives every update):'
 Write-Host '  CLAUDE_STACK_FRESH_SESSION_PCT   what share of the context window a session may carry before an'
 Write-Host '                                   orchestration run is offered a fresh one (default 40; 0 = off)'
-Write-Host '  CLAUDE_STACK_CONTEXT_WINDOW      the window that percentage applies to (seeded 1000000). SET IT'
-Write-Host '                                   TO 200000 ON A 200k MODEL - the value outranks detection, and a'
-Write-Host '                                   declared 1M window moves the trigger from 150k to 400k. Clear'
-Write-Host '                                   it for auto: the hooks read the settings model id''s window'
-Write-Host '                                   suffix (opus[1m]), else what the session has carried.'
+Write-Host '  CLAUDE_STACK_CONTEXT_WINDOW      the window that percentage applies to - seeded EMPTY, which'
+Write-Host '                                   means auto-detect: the hooks read the settings model id''s'
+Write-Host '                                   window suffix (opus[1m]), else the tier the session has'
+Write-Host '                                   already proven. Fill it in (1000000 / 200000) only to'
+Write-Host '                                   overrule that; the value outranks every detection layer.'
 Write-Host 'On the auto-detected 200k tier the percentage is INERT below 76: the trigger keeps the measured'
-Write-Host '150k floor, and 200k x 75% is still 150k. It bites on a 1M window, where 40% is 400k.'
+Write-Host '150k floor, and 200k x 75% is still 150k. Above that tier it is capped at 250k, because the'
+Write-Host 'harness auto-compacts at ~390k and a trigger above that ceiling can never fire.'

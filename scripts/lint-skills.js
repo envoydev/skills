@@ -366,6 +366,60 @@ function lintJudgmentCatalog(catalog, rosters)
 // cross-mentions). Every copy is pinned by a marker phrase from that file's own wording,
 // matched whitespace-normalized so md line wrapping cannot break it. A copy edited or deleted
 // breaks its marker -> the finding lists every other copy, forcing the sync mechanically.
+// 30. A CAPABILITY SENTENCE in the stack's own source needs a live probe or it does not ship.
+// Three artifacts were caught asserting a harness capability nobody had tested: a deny-list claim
+// that the account settings.json `Read(**/config.json)` rule also stops a Bash `cat` (refuted live -
+// two cats returned content, is_error:false, zero denial strings in the transcript), a brief handing
+// a git-drift question to a seat with no Bash, and the installer comment resting the whole
+// SECRET_DENY mechanism on the first claim. A false claim in the SOURCE propagates to every install.
+// So: a sentence that says what the harness DOES with a tool, a permission, a hook or a config file
+// must carry its evidence within the same comment block - `measured`, `replayed`, `reproduced`,
+// `probed`, `verified`, `confirmed` or `proven`. Deliberately narrow: it is the assertion shape that
+// shipped false three times, not every sentence with the word 'hook' in it.
+const CAP_NOUN = /(deny (list|rule)|denial|permission|PreToolUse|PostToolUse|SessionStart|UserPromptSubmit|Stop hook|matcher|settings\.json|additionalContext|subagent|\.mcp\.json|allowlist)/i;
+const CAP_VERB = /(reaches|does not reach|never reaches|blocks|does not block|cannot|is not consulted|expands|does not expand|takes effect|inherits|does not inherit|propagates|never fires)/i;
+const CAP_PROOF = /\b(measured|replayed|reproduced|probed|verified|confirmed|proven|proved)\b/i;
+function lintCapabilityClaims(files)
+{
+    const out = [];
+    for (const { path: rel, text } of files)
+    {
+        for (const m of text.matchAll(/[^.\n]{40,400}\./g))
+        {
+            const sentence = m[0];
+            // a function header or a banner comment names the mechanism, it does not assert about it
+            // a banner comment ('# INSTALL + UPDATE: ...') or a function header names the mechanism,
+            // it does not assert anything about how the harness behaves
+            if (/^\s*(#|\/\/)\s*[A-Z][A-Z +_-]{2,}:/.test(sentence)) continue;
+            if (/^\s*\w[\w-]*\s*\(\)\s*\{/.test(sentence)) continue;
+            if (/^\s*function\s+[\w-]+/.test(sentence)) continue;
+            if (!CAP_NOUN.test(sentence) || !CAP_VERB.test(sentence)) continue;
+            const ctx = text.slice(Math.max(0, m.index - 800), m.index + sentence.length + 800);
+            if (CAP_PROOF.test(ctx)) continue;
+            const line = text.slice(0, m.index).split('\n').length;
+            out.push(`${rel}:${line} asserts a harness capability with no probe in its comment block - cite the measurement or do not claim it: '${sentence.trim().slice(0, 90)}'`);
+        }
+    }
+    return out;
+}
+
+// 29. Every DELIBERATE-ONLY skill must be in guard-fresh-session-start.js's ORCHESTRATION list.
+// `disable-model-invocation: true` is the skill saying it only ever starts because a person asked
+// for it - which is exactly the run that must not start on another finished run's carried history.
+// The list was hand-maintained and drifted: four such runs were missing from the live regex, so the
+// fresh-session offer never fired for them. Generated from the roster instead of trusted.
+function lintOrchestrationRoster(deliberateSkills, hookSrc)
+{
+    const m = /^const ORCHESTRATION = (\/.*\/);$/m.exec(hookSrc);
+    if (!m) return ['guard-fresh-session-start.js: no `const ORCHESTRATION = /.../;` line to check the roster against'];
+    let re;
+    try { re = new RegExp(m[1].slice(1, m[1].lastIndexOf('/'))); }
+    catch (err) { return [`guard-fresh-session-start.js: ORCHESTRATION is not a usable regex (${err.message})`]; }
+    return deliberateSkills
+        .filter((name) => !re.test(name))
+        .map((name) => `${name} declares disable-model-invocation but is absent from guard-fresh-session-start.js's ORCHESTRATION list - the fresh-session offer will never fire for it`);
+}
+
 // 28. The plugin-settings catalog (meta/plugin-settings.json) - the same silent-miss class as
 // evidence.json, one layer out: a row for a plugin the stack does not install is never offered,
 // and a key the plugin does not read is a no-op the user still gets asked about. The version the
@@ -1472,6 +1526,42 @@ function main()
             flag(`meta/plugin-settings.json is unreadable: ${err.message}`);
         }
 
+        // 30. Capability sentences in the stack's own source carry their probe.
+        try
+        {
+            const capFiles = [];
+            const walk = (dir, rel) =>
+            {
+                for (const e of fs.readdirSync(dir, { withFileTypes: true }))
+                {
+                    if (e.name.startsWith('.')) continue;
+                    const full = path.join(dir, e.name);
+                    const r = `${rel}/${e.name}`;
+                    if (e.isDirectory()) walk(full, r);
+                    else if (/\.(md|js|sh|ps1)$/.test(e.name)) capFiles.push({ path: r, text: fs.readFileSync(full, 'utf8') });
+                }
+            };
+            for (const d of ['stack/rules', 'stack/hooks', 'scripts/os', 'setup-plugin']) walk(path.join(ROOT, d), d);
+            for (const finding of lintCapabilityClaims(capFiles)) flag(finding);
+        }
+        catch (err)
+        {
+            flag(`the capability-claim sweep could not run: ${err.message}`);
+        }
+
+        // 29. The deliberate-only roster vs the fresh-session hook's ORCHESTRATION list.
+        try
+        {
+            const deliberate = localSkillDirs()
+                .filter((d) => /^\s*disable-model-invocation:\s*true\s*$/m.test(fs.readFileSync(path.join(SKILLS_DIR, d, 'SKILL.md'), 'utf8')));
+            const hookSrc = fs.readFileSync(path.join(ROOT, 'stack', 'hooks', 'guard-fresh-session-start.js'), 'utf8');
+            for (const finding of lintOrchestrationRoster(deliberate, hookSrc)) flag(finding);
+        }
+        catch (err)
+        {
+            flag(`the deliberate-only roster check could not run: ${err.message}`);
+        }
+
         // 23. The judgment catalog (meta/judgment.json) - same silent-miss
         //     class: refs must resolve, overlaps carry both gaps, thresholds parse.
         const judgmentPath = path.join(ROOT, 'meta', 'judgment.json');
@@ -1722,6 +1812,8 @@ module.exports = {
     localSkillDirs,
     lintEvidenceCatalog,
     lintPluginSettings,
+    lintOrchestrationRoster,
+    lintCapabilityClaims,
     lintJudgmentCatalog,
     lintEnvironmentCatalog,
     lintSharedRules,

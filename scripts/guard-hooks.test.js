@@ -132,11 +132,16 @@ test('guard-fresh-session-start: the threshold scales with the context window', 
     { tool_name: 'Skill', tool_input: { skill: 'project-quality-loop' }, transcript_path: tp },
     { env: { ...process.env, ...(env || {}) } }).status;
 
+  const w1m = (env) => ({ CLAUDE_STACK_CONTEXT_WINDOW: '1000000', ...(env || {}) });
   assert.equal(call(at('w-200k', 190000)), 2, '190k on a 200k window is past the 150k floor');
-  assert.equal(call(at('w-1m-300k', 300000)), 0, '300k on a 1M window is only 30% - not yet worth a fresh session');
-  assert.equal(call(at('w-1m-450k', 450000)), 2, '450k on a 1M window is past 40%');
-  assert.equal(call(at('w-1m-450k', 450000), { CLAUDE_STACK_FRESH_SESSION_PCT: '60' }), 0, 'the percentage is tunable');
-  assert.equal(call(at('w-1m-650k', 650000), { CLAUDE_STACK_FRESH_SESSION_PCT: '60' }), 2, '... and still fires at its own step');
+  // Above the 200k tier the trigger is CAPPED at 250k: 40% of 1M is 400k, which is ABOVE the
+  // ceiling the harness itself enforces (~390k measured), so the percentage alone could never fire.
+  assert.equal(call(at('w-1m-200k', 200000), w1m()), 0, '200k on a 1M window is under the 250k ceiling');
+  assert.equal(call(at('w-1m-300k', 300000)), 2, '300k on a 1M window is past it');
+  assert.equal(call(at('w-1m-450k', 450000)), 2, '... and so is 450k');
+  assert.equal(call(at('w-1m-450k-p60', 450000), { CLAUDE_STACK_FRESH_SESSION_PCT: '60' }), 2, 'a percentage ABOVE the ceiling does not lift it');
+  assert.equal(call(at('w-1m-100k-p15', 100000), w1m({ CLAUDE_STACK_FRESH_SESSION_PCT: '15' })), 0, 'a percentage BELOW the ceiling is the trigger');
+  assert.equal(call(at('w-1m-160k-p15', 160000), w1m({ CLAUDE_STACK_FRESH_SESSION_PCT: '15' })), 2, '... and fires at its own step');
 });
 
 // ---- hooks audit: every gate branch pinned in both directions (block AND the exemption) ----
@@ -259,19 +264,53 @@ test('guard-ungated-commit: trivial diffs, clean trees, non-commits and non-repo
 
 test('guard-ungated-commit: the receipt states', () => {
   const dir = scratchRepo();
+  const head = spawnSync('git', ['-C', dir, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).stdout.trim();
   const gate = path.join(dir, '.claude', 'docs', 'flow', 'COMMIT-GATE');
   fs.mkdirSync(path.dirname(gate), { recursive: true });
   const receipt = (s) => fs.writeFileSync(gate, s);
+  // the conformant receipt, and the pieces each clause removes from it
+  const full = (over = {}) => [
+    over.first || 'VERIFIED the pre-commit checkpoint',
+    over.auth === null ? null : (over.auth || 'authorized: "commit it"'),
+    over.head === null ? null : `head: ${over.head || head}`,
+    over.spec === null ? null : (over.spec || 'spec: 3 files'),
+    over.probe === null ? null : (over.probe || 'live-probe: `npm test` 238/238'),
+  ].filter((l) => l != null).join('\n') + '\n';
+
   receipt('WAIVED - "skip the review"\n'); assert.equal(gateIn(dir, 'git commit -am x'), 0, 'WAIVED');
+  receipt('WAIVED\n'); assert.equal(gateIn(dir, 'git commit -am x'), 2, 'WAIVED with no quoted words');
+  receipt(full()); assert.equal(gateIn(dir, 'git commit -am x'), 0, 'the conformant receipt');
   receipt('VERIFIED scope\n'); assert.equal(gateIn(dir, 'git commit -am x'), 2, 'VERIFIED without the authorized line');
-  receipt('VERIFIED scope\nauthorized: yes\n'); assert.equal(gateIn(dir, 'git commit -am x'), 2, 'an authorized line with no quoted words');
-  receipt('VERIFIED scope\nauthorized: PENDING - append the words\n'); assert.equal(gateIn(dir, 'git commit -am x'), 2, 'a PENDING placeholder');
-  receipt('VERIFIED scope\nauthorized: "commit it"\n'); assert.equal(gateIn(dir, 'git commit -am x'), 0, 'VERIFIED plus quoted consent');
+  receipt(full({ auth: 'authorized: yes' })); assert.equal(gateIn(dir, 'git commit -am x'), 2, 'an authorized line with no quoted words');
+  receipt(full({ auth: 'authorized: PENDING - append the words' })); assert.equal(gateIn(dir, 'git commit -am x'), 2, 'a PENDING placeholder');
+  receipt(full({ auth: 'authorized: ""' })); assert.equal(gateIn(dir, 'git commit -am x'), 2, 'an EMPTY quoted span');
+  receipt(full({ auth: 'authorized: "what time is it?"' })); assert.equal(gateIn(dir, 'git commit -am x'), 2, 'a quote carrying no consent verb');
+  receipt(full({ auth: 'answered: option 1 "Commit now"' })); assert.equal(gateIn(dir, 'git commit -am x'), 0, 'consent given by picking an option has its own spelling');
+  receipt(full({ head: '0'.repeat(40) })); assert.equal(gateIn(dir, 'git commit -am x'), 2, 'a head: naming a different commit');
+  receipt(full({ head: head.slice(0, 8) })); assert.equal(gateIn(dir, 'git commit -am x'), 0, 'a short sha is the same sha');
+  receipt(full({ head: null })); assert.equal(gateIn(dir, 'git commit -am x'), 2, 'no head: line');
+  receipt(full({ spec: null })); assert.equal(gateIn(dir, 'git commit -am x'), 2, 'no spec: line');
+  receipt(full({ spec: 'spec: 1 file' })); assert.equal(gateIn(dir, 'git commit -am x'), 2, 'a spec covering fewer files than the tree has');
+  receipt(full({ probe: null })); assert.equal(gateIn(dir, 'git commit -am x'), 2, 'no live-probe line');
+  receipt(full({ probe: 'live probe = NOT RUN - no test target' })); assert.equal(gateIn(dir, 'git commit -am x'), 0, "'live probe' spelled with a space, NOT RUN with a reason");
+  // the VERIFIED line names a verify skill and this transcript carries no Skill call
+  const tp = transcript('no-skill', [assistantRow('m1', 'reviewed')]);
+  const gateT = (cmd) => runIn('guard-ungated-commit.js', { tool_name: 'Bash', tool_input: { command: cmd }, transcript_path: tp },
+    { env: { ...process.env, CLAUDE_PROJECT_DIR: dir }, cwd: dir }).status;
+  receipt(full({ first: 'VERIFIED project-verify-code passed' })); assert.equal(gateT('git commit -am x'), 2, 'a verify skill named but never called');
+  receipt(full({ first: 'VERIFIED project-verify-code passed' }) + 'carried: cycle 3, reviewed 2026-09-05\n');
+  assert.equal(gateT('git commit -am x'), 0, 'unless the receipt says the review is carried');
+
+  receipt(full());
   const old = (Date.now() - 3 * 3600 * 1000) / 1000; fs.utimesSync(gate, old, old);
   assert.equal(gateIn(dir, 'git commit -am x'), 2, 'a 3h-old receipt is absent');
   receipt('garbage\n'); assert.equal(gateIn(dir, 'git commit -am x'), 2, 'an unrecognized first line');
   fs.unlinkSync(gate);
-  assert.equal(gateIn(dir, `printf 'VERIFIED x\\nauthorized: "go"\\n' > .claude/docs/flow/COMMIT-GATE && git commit -am x`), 0, 'the atomic write+commit shape carries its receipt');
+  // the atomic write+commit shape carries its receipt - and answers to the SAME contract, or it
+  // would be the cheapest way to skip every clause above
+  const atomic = full().trim().replace(/\n/g, '\\n');
+  assert.equal(gateIn(dir, `printf '${atomic}\\n' > .claude/docs/flow/COMMIT-GATE && git commit -am x`), 0, 'the atomic write+commit shape carries its receipt');
+  assert.equal(gateIn(dir, `printf 'VERIFIED x\\nauthorized: "go"\\n' > .claude/docs/flow/COMMIT-GATE && git commit -am x`), 2, 'the atomic shape gets no lighter contract');
   assert.equal(gateIn(dir, `echo 'VERIFIED x' > .claude/docs/flow/COMMIT-GATE && git commit -am x`), 2, 'atomic VERIFIED without authorized:');
   assert.equal(gateIn(dir, 'git commit -am "COMMIT-GATE VERIFIED authorized: x > flow/COMMIT-GATE"'), 2, 'receipt words inside the commit message');
   fs.mkdirSync(path.join(dir, 'docs', 'flow'), { recursive: true });
@@ -282,12 +321,151 @@ test('guard-ungated-commit: the receipt states', () => {
   assert.equal(gateIn(dir, 'git commit -am x', { CLAUDE_STACK_DOCS_PATH: 'docs', CLAUDE_DOCS_PATH: 'nowhere' }), 0, 'and the new key wins when both are set');
 });
 
+test('guard-ungated-commit: an option label THIS run wrote is not the user asking', () => {
+  // measured: `authorized: "Commit now (Recommended)"` - marker and all - prescribed by a skill,
+  // while the hook's own denial text demanded 'their words, verbatim'. The marker proves nothing
+  // either way (the harness stores the marked label as the answer), so it is stripped before the
+  // comparison and the LABEL ITSELF is what disqualifies the quote.
+  const dir = scratchRepo();
+  const head = spawnSync('git', ['-C', dir, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).stdout.trim();
+  const gate = path.join(dir, '.claude', 'docs', 'flow', 'COMMIT-GATE');
+  fs.mkdirSync(path.dirname(gate), { recursive: true });
+  const tp = transcript('own-label', [
+    { type: 'assistant', message: { id: 'q1', content: [{ type: 'tool_use', id: 'u1', name: 'AskUserQuestion', input: { questions: [{ question: 'Next?', options: [{ label: 'Commit now (Recommended)', description: 'land it' }, { label: 'Hold', description: 'wait' }] }] } }] } },
+  ]);
+  const body = (auth) => `VERIFIED the checkpoint\n${auth}\nhead: ${head}\nspec: 3 files\nlive-probe: npm test\n`;
+  const gateT = () => runIn('guard-ungated-commit.js', { tool_name: 'Bash', tool_input: { command: 'git commit -am x' }, transcript_path: tp },
+    { env: { ...process.env, CLAUDE_PROJECT_DIR: dir }, cwd: dir }).status;
+  fs.writeFileSync(gate, body('authorized: "Commit now (Recommended)"')); assert.equal(gateT(), 2, 'the model\'s own option label, marker included');
+  fs.writeFileSync(gate, body('authorized: "Commit now"')); assert.equal(gateT(), 2, 'and with the marker stripped');
+  fs.writeFileSync(gate, body('answered: Commit now')); assert.equal(gateT(), 0, 'the same choice, spelled as the answer it was');
+  fs.writeFileSync(gate, body('authorized: "ok commit it and push"')); assert.equal(gateT(), 0, 'the user\'s own typed words are untouched');
+});
+
 test('guard-ungated-commit: a cd or -C into a sibling repo judges THAT tree', () => {
   const home = cleanRepo();
   const sib = scratchRepo();
   assert.equal(gateIn(home, 'git commit -am x'), 0, 'the clean home repo passes');
   assert.equal(gateIn(home, `cd ${sib} && git commit -am x`), 2, 'cd into the dirty sibling');
   assert.equal(gateIn(home, `git -C "${sib}" commit -am x`), 2, '-C into the dirty sibling');
+});
+
+// A clone with a real upstream, so `git log @{u}..HEAD` answers - the publish gate's
+// nothing-to-publish exemption reads it.
+function pushRepo() {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'push-'));
+  spawnSync('git', ['init', '-q', '--bare', path.join(base, 'remote.git')], { encoding: 'utf8' });
+  const dir = path.join(base, 'repo');
+  spawnSync('git', ['clone', '-q', path.join(base, 'remote.git'), dir], { encoding: 'utf8' });
+  const git = (...a) => spawnSync('git', ['-C', dir, ...a], { encoding: 'utf8' });
+  git('config', 'user.email', 't@example.com'); git('config', 'user.name', 'test');
+  fs.writeFileSync(path.join(dir, 'a.txt'), 'seed\n');
+  git('add', '-A'); git('commit', '-qm', 'seed'); git('branch', '-M', 'main'); git('push', '-q', '-u', 'origin', 'main');
+  return dir;
+}
+
+test('guard-ungated-commit: nothing gated a push, and a quoted publish verb is still prose', () => {
+  // Four bundles: `git push` and `gh pr merge` passed EVERY guard on replay. One session's first
+  // state-changing act published unpushed commits 18 minutes before any receipt existed, and 40
+  // files reached a shared develop ungated. The gate ships with the heredoc + quote masking or it
+  // reproduces the measured 430,740-token false positive - a report write denied for QUOTING a
+  // merge command.
+  const dir = pushRepo();
+  const flow = path.join(dir, '.claude', 'docs', 'flow');
+  fs.mkdirSync(flow, { recursive: true });
+  const receipt = (s) => (s === null ? fs.rmSync(path.join(flow, 'PUSH-GATE'), { force: true }) : fs.writeFileSync(path.join(flow, 'PUSH-GATE'), s));
+  const ahead = () => { fs.appendFileSync(path.join(dir, 'a.txt'), 'more\n'); spawnSync('git', ['-C', dir, 'commit', '-qam', 'work'], { encoding: 'utf8' }); };
+
+  assert.equal(gateIn(dir, 'git push'), 0, 'nothing ahead of the upstream publishes nothing');
+  ahead();
+  assert.equal(gateIn(dir, 'git push'), 2, 'commits ahead, no receipt');
+  assert.equal(gateIn(dir, 'git push --dry-run'), 0, 'a dry run publishes nothing');
+  assert.equal(gateIn(dir, 'git push -n'), 0, '... and so does -n');
+  assert.equal(gateIn(dir, 'gh pr merge 12 --squash'), 2, 'a merge lands code on the default branch');
+
+  const head = spawnSync('git', ['-C', dir, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).stdout.trim();
+  // the publish receipt answers to the same contract as the commit one - the spec names the set
+  // LEAVING the machine, so it is required but never counted against the working tree
+  const pushOk = (auth = 'authorized: "push it"') =>
+    `VERIFIED the release merge\n${auth}\nhead: ${head}\nspec: 2 commits on develop\nlive-probe: npm test green\n`;
+  receipt('VERIFIED the release merge\n');
+  assert.equal(gateIn(dir, 'git push'), 2, 'VERIFIED without the authorized line is not consent');
+  receipt(pushOk('authorized: "what time is it?"'));
+  assert.equal(gateIn(dir, 'git push'), 2, 'a quote carrying no publish verb is not consent either');
+  receipt(pushOk().replace(/^head:.*\n/m, ''));
+  assert.equal(gateIn(dir, 'git push'), 2, 'no head: line');
+  receipt(pushOk());
+  assert.equal(gateIn(dir, 'git push'), 0, 'the conformant publish receipt');
+  receipt('WAIVED - "just push"\n');
+  assert.equal(gateIn(dir, 'git push'), 0, 'an explicit waiver');
+  const old = (Date.now() - 3 * 3600 * 1000) / 1000;
+  fs.utimesSync(path.join(flow, 'PUSH-GATE'), old, old);
+  assert.equal(gateIn(dir, 'git push'), 2, 'a 3h-old receipt is absent');
+  receipt(null);
+  const atomicPush = pushOk().trim().replace(/\n/g, '\\n');
+  assert.equal(gateIn(dir, `printf '${atomicPush}\\n' > .claude/docs/flow/PUSH-GATE && git push`), 0,
+    'the atomic write+publish shape carries its own receipt');
+  assert.equal(gateIn(dir, `printf 'VERIFIED x\\nauthorized: "go"\\n' > .claude/docs/flow/PUSH-GATE && git push`), 2,
+    '... and gets no lighter contract than the file');
+  assert.equal(gateIn(dir, 'git push', { CLAUDE_STACK_PUSH_GATE: '0' }), 0, 'the switch turns the publish half off');
+
+  // the false-positive class this gate must never reproduce
+  assert.equal(gateIn(dir, "cat > report.md <<'EOF'\nThen run `gh pr merge 12 --squash` and `git push`.\nEOF"), 0,
+    'a report that QUOTES a publish verb is prose - the 430,740-token false positive');
+  assert.equal(gateIn(dir, 'echo "then git push to develop"'), 0, 'so is an echo');
+  assert.equal(gateIn(dir, "grep -o 'git push' transcript.jsonl"), 0, 'so is a grep for push events');
+  assert.equal(gateIn(dir, 'git commit -m "prep for git push"'), 0, 'a clean tree fires neither gate');
+  fs.writeFileSync(path.join(dir, 'big.txt'), forty());
+  spawnSync('git', ['-C', dir, 'add', '-A'], { encoding: 'utf8' });
+  assert.equal(gateIn(dir, 'git commit -m "prep for git push"'), 2, 'and a dirty one fires the COMMIT gate, not the publish one');
+});
+
+test('guard-catastrophic-rm: git destroys a working tree too, and prose about it does not', () => {
+  // 225 lines with no occurrence of `git`: a destructive `git checkout --` replayed exit 0 against
+  // every guard in the stack. Gated on ACTUAL loss - a clean tree has nothing to destroy.
+  const dir = cleanRepo();
+  const rm = (command) => runIn('guard-catastrophic-rm.js', { tool_name: 'Bash', tool_input: { command } },
+    { env: { ...process.env, CLAUDE_PROJECT_DIR: dir }, cwd: dir }).status;
+
+  assert.equal(rm('git checkout -- .'), 0, 'a CLEAN tree has nothing to lose');
+  assert.equal(rm('git reset --hard'), 0, '... same');
+  fs.writeFileSync(path.join(dir, 'seed.txt'), 'changed\n');
+  fs.writeFileSync(path.join(dir, 'new.txt'), 'x\n');
+  assert.equal(rm('git checkout -- .'), 2, 'a dirty tree loses work with no reflog');
+  assert.equal(rm('git checkout .'), 2, 'the pathless spelling too');
+  assert.equal(rm('git restore seed.txt'), 2, 'and restore');
+  assert.equal(rm('git reset --hard HEAD'), 2, 'and reset --hard');
+  assert.equal(rm('git clean -fdx'), 2, 'and clean -fdx');
+  assert.equal(rm('git restore --staged seed.txt'), 0, 'unstaging destroys nothing');
+  assert.equal(rm('git checkout -b feature'), 0, 'a branch checkout is not a discard');
+  assert.equal(rm('git reset HEAD~1'), 0, 'a soft reset keeps the tree');
+  // a quoted span is data - denying it teaches the obfuscation that defeats the gate on a real one
+  assert.equal(rm('echo "run git reset --hard"'), 0, 'an echo quoting it invokes nothing');
+  assert.equal(rm("grep -o 'git checkout --' t.jsonl"), 0, 'nor does a grep pattern');
+  assert.equal(rm('git commit -m "undo the git reset --hard"'), 0, 'nor a commit message');
+  assert.equal(rm("cat > plan.md <<'EOF'\nThen: git clean -fdx\nEOF"), 0, 'nor a plan document');
+  assert.equal(rm('echo "careful" && git clean -fdx'), 2, 'but a real one after a prose mention still blocks');
+});
+
+test('guard-read-whole-file: the extension is judged against the PATH, not the whole line', () => {
+  // Every one of these was replayed as a false positive: GATED_EXT_ANY was tested against the WHOLE
+  // compound command at three sites, and the sweep test ran above the per-segment loop.
+  const big = BIG;
+  assert.equal(bash('guard-read-whole-file.js', `ls src/*.js && head -40 ${big}`), 0,
+    'an unrelated *.js glob in a SIBLING segment denies nothing');
+  assert.equal(bash('guard-read-whole-file.js', `grep -rn "x" --include='*.cs' . | head -20 && wc -l ${big}`), 0,
+    'a bounded grep beside a glob is not a dump');
+  assert.equal(bash('guard-read-whole-file.js', `find . -name "guard-read-whole-file.js" && grep -n "THRESHOLD" ${big} | head -20`), 0,
+    'an exact-filename find names ONE file - the know-the-name-not-the-path idiom its own denial used to advise');
+  assert.equal(bash('guard-read-whole-file.js', 'head -n 100000 notes.txt # about Foo.cs'), 0,
+    'a huge head of a NON-gated file is not gated by a .cs mention elsewhere');
+  assert.equal(bash('guard-read-whole-file.js', `python3 -c "print(open('notes.txt').read())" # Foo.cs`), 0,
+    'nor is a runtime read of one');
+  assert.equal(bash('guard-read-whole-file.js', `cat ${big} > /tmp/copy.js`), 0,
+    'a redirected dump never reaches the context');
+  // and the sweeps still block
+  assert.equal(bash('guard-read-whole-file.js', 'for f in src/*.cs; do cat -n "$f"; done'), 2, 'a loop still blocks');
+  assert.equal(bash('guard-read-whole-file.js', 'find . -name "*.cs" -exec cat {} +'), 2, 'a globbed find -exec cat still blocks');
 });
 
 test('guard-unapproved-dispatch: the stamp lifecycle', () => {
@@ -329,16 +507,49 @@ test("guard-unapproved-dispatch: a stamp written before this session began is an
   assert.equal(disp(), 0, 'a stamp written during the session');
 });
 
-test('guard-stop-contract: the AskUserQuestion gate never interrupts a response', () => {
+test('guard-stop-contract: the AskUserQuestion branch injects and NEVER denies', () => {
   // It used to deny an ask carrying no fresh-session option, which stopped Claude mid-response to
-  // rebuild the question. The offer moved to the Stop wiring, so every ask now passes.
+  // rebuild the question. The matcher is wired again, injection-only: every path exits 0, and what
+  // it emits is `hookSpecificOutput.additionalContext` the model reads while building the ask.
   const logDir = fs.mkdtempSync(path.join(TMP, 'asklog-'));
   const hot = transcript('ask-hot', [assistantRow('h1', 'ok', { cache_read_input_tokens: 900000 })]);
-  const ask = (options) => runIn('guard-stop-contract.js',
-    { tool_name: 'AskUserQuestion', hook_event_name: 'PreToolUse', transcript_path: hot, tool_input: { questions: [{ question: 'Which next?', options }] } },
-    { env: { ...process.env, CLAUDE_STACK_HOOK_LOG_DIR: logDir } }).status;
-  assert.equal(ask([{ label: 'Continue', description: 'x' }, { label: 'Stop', description: 'y' }]), 0, 'no fresh option, deep into a 1M session - still passes');
-  assert.equal(ask([{ label: 'Fresh session', description: 'resume' }]), 0, 'and so does one that has it');
+  const cold = transcript('ask-cold', [
+    { type: 'user', message: { content: 'clean up the branch' } },
+    { type: 'assistant', message: { id: 'c1', content: [{ type: 'tool_use', id: 't1', name: 'Bash', input: { command: 'git status --porcelain' } }], usage: { cache_read_input_tokens: 900 } } },
+    { type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 't1', content: 'M f' }] } },
+  ]);
+  const ask = (tp, questions) => runIn('guard-stop-contract.js',
+    { tool_name: 'AskUserQuestion', hook_event_name: 'PreToolUse', transcript_path: tp, tool_input: { questions } },
+    { env: { ...process.env, CLAUDE_STACK_HOOK_LOG_DIR: logDir } });
+  const ctxOf = (r) => { try { return JSON.parse(r.stdout).hookSpecificOutput.additionalContext; } catch { return ''; } };
+
+  const deep = ask(hot, [{ question: 'Which next?', options: [{ label: 'Continue', description: 'x' }, { label: 'Stop', description: 'y' }] }]);
+  assert.equal(deep.status, 0, 'no fresh option, deep into a 1M session - it injects, it does not deny');
+  assert.match(ctxOf(deep), /resume in a fresh session/i, 'the fresh-session offer reaches a flow whose every stop is a tool call');
+  assert.equal(ask(hot, [{ question: 'Continue or resume in a fresh session?', options: [{ label: 'Fresh session', description: 'resume' }] }]).status, 0);
+  assert.doesNotMatch(ctxOf(ask(hot, [{ question: 'Next?', options: [{ label: 'Resume in a fresh session', description: 'start clean' }] }])), /add an option to/i,
+    'an ask that already offers it is not told to offer it');
+
+  // stale scope: an option naming repo state, with no state read in this turn
+  const stale = ask(transcript('ask-stale', [assistantRow('s1', 'ok', { cache_read_input_tokens: 900 })]),
+    [{ question: 'Publish?', options: [{ label: 'Push to origin', description: 'land the commit' }] }]);
+  assert.match(ctxOf(stale), /no `git status`/, 'an ask built on an unrefreshed scope is flagged');
+  assert.doesNotMatch(ctxOf(ask(cold, [{ question: 'Publish?', options: [{ label: 'Push to origin', description: 'land it' }] }])), /no `git status`/,
+    'a state read in the same turn clears it');
+
+  // house voice, on a surface no Stop hook reads
+  const voice = ask(cold, [{ question: 'Target - staging or prod?', header: 'Target', options: [{ label: 'staging', description: 'the shared box' }] }]);
+  assert.equal(ctxOf(voice), '', "a plain hyphen and an apostrophe are clean - and a clean ask emits nothing at all");
+  assert.match(ctxOf(ask(cold, [{ question: 'Pick one \u2014 now', options: [{ label: 'the "fast" one', description: 'x' }] }])),
+    /em- or en-dash.*double quote/s, 'an em-dash and a double quote in the ask text are both named');
+
+  // two typed turns before one reply - the contradicted-recommendation shape
+  const two = ask(transcript('ask-two', [
+    { type: 'user', message: { content: 'stop touching staging' } },
+    { type: 'user', message: { content: 'and add the health endpoint' } },
+    assistantRow('t1', 'ok', { cache_read_input_tokens: 900 }),
+  ]), [{ question: 'Which one?', options: [{ label: 'Deploy staging', description: 'x' }] }]);
+  assert.match(ctxOf(two), /more than one message before this reply/);
 });
 
 test('guard-stop-contract: prose offers, tool-call ends, continuations and unreadable turns', () => {
@@ -420,7 +631,7 @@ test('guard-stop-contract: the fresh-session offer lands at turn end, once per c
   const stop = (tp) => runIn('guard-stop-contract.js', { hook_event_name: 'Stop', transcript_path: tp },
     { env: { ...process.env, CLAUDE_STACK_HOOK_LOG_DIR: logDir } }).status;
 
-  assert.equal(stop(at('fs-cold', 300000)), 0, '300k on a 1M window is under 40% - nothing to offer');
+  assert.equal(stop(at('fs-cold', 220000)), 0, '220k on a 1M window is under the 250k trigger - nothing to offer');
   const s1 = at('fs-hot', 500000);
   assert.equal(stop(s1), 2, 'a CLEAN close past the trigger: held once so the user is asked');
   assert.equal(stop(s1), 0, 'the same session again - already asked at this cost step');
@@ -511,6 +722,24 @@ test('guard-cross-project-write: the session\'s own scratch and the account dir 
   const home = os.homedir();
   if (home) assert.equal(w(path.join(home, '.claude', 'projects', 'p', 'memory', 'm.md')), 0, 'memory writes must keep working');
   assert.equal(w(path.join(path.dirname(repoRoot), 'some-other-repo', 'src', 'a.ts')), 2, 'a real sibling repo is still blocked');
+});
+
+test('guard-cross-project-write: the session cleaning its own scratch is not a cross-project write', () => {
+  // Every shape here was replayed as a false positive against a real session's own scratch.
+  // in-project on purpose: the defect was the TOKENIZER, which split `"$SP"/run*.log` into two
+  // words and read the second as a path at the filesystem root - so the target's real location is
+  // what the assertion has to isolate.
+  const sp = path.join(XP_ROOT, 'scratch');
+  assert.equal(xpBash(`SP=${sp}; rm -f "$SP"/run*.log`), 0,
+    'a quoted var with an unquoted suffix is ONE word - splitting it made `/run*.log` an absolute path (3 bundles)');
+  assert.equal(xpBash('rm -f "$SP"/run*.log'), 0, 'and an unresolved variable is never judged');
+  assert.equal(xpBash(`rm -f "${sp}/run.log"`), 0, 'the fully quoted spelling always passed - now all three agree');
+  assert.equal(xpBash("sed -i '' '/^DIVIDER$/d' notes.md"), 0, "a sed ADDRESS is a script, not a path");
+  assert.equal(xpBash("sed -i '' 's/a/b/' notes.md"), 0, 'as is a substitution');
+  assert.equal(xpBash('rm -f /run*.log'), 0, 'a target whose leading segment is a glob names no project to hand off to');
+  // and the real writes still block, including one the variable resolution now makes judgeable
+  assert.equal(xpBash(`sed -i 's/a/b/' ${XP_OTHER}/f.ts x`), 2, 'an in-place edit in another project');
+  assert.equal(xpBash(`D=${XP_OTHER}; rm -rf "$D"/x`), 2, 'a variable assigned a LITERAL out-of-tree path is judgeable');
 });
 
 test('guard-cross-project-write: prose describing a command is not a command', () => {
@@ -727,6 +956,44 @@ function accountDir(name, model) {
   return d;
 }
 
+test('guard-fresh-session-start: the slash and compaction routes carry the same offer', () => {
+    // The Skill route reaches only a run invoked as a Skill CALL. Measured across four bundles:
+    // 4 of 4 orchestration runs arrived slash-injected, ZERO Skill tool_use events in 45 messages,
+    // two captures entered at 150.4k and 164.5k - both past the floor, both ungated. And a long
+    // agentic turn emits no Stop either (23m27s / 277 messages / +178k ctx, zero Stop events), so
+    // the compaction the harness DOES guarantee is the third route.
+    const ups = (prompt, tp, env) => runIn('guard-fresh-session-start.js',
+        { hook_event_name: 'UserPromptSubmit', prompt, transcript_path: tp }, { env: winEnv(env) });
+    const start = (source, env) => runIn('guard-fresh-session-start.js',
+        { hook_event_name: 'SessionStart', source }, { env: winEnv(env) });
+    const injected = (r) => (r.stdout && r.stdout.includes('additionalContext') ? JSON.parse(r.stdout).hookSpecificOutput.additionalContext : '');
+    const hot = ctxAt('ups-hot', 190000);
+
+    // NEVER exit 2 on UserPromptSubmit: that erases the user's prompt and shows the reason to the
+    // user only - the run would be lost and the model would never learn why.
+    const slash = ups('<command-name>/project-quality-loop</command-name>\nrun it', hot);
+    assert.equal(slash.status, 0, 'the slash route never denies');
+    assert.match(injected(slash), /Do NOT start the run yet/, '... it injects the ask instead');
+    assert.match(injected(ups('/project-agent-capabilities', hot)), /Do NOT start the run yet/, 'a hand-typed slash is the same intent');
+    assert.match(injected(ups('<command-name>/claude-stack:update</command-name>', hot)), /Do NOT start the run yet/, 'the guided plugin walks are orchestration too');
+    assert.equal(injected(ups('<command-name>/project-quality-loop</command-name>', ctxAt('ups-cold', 40000))), '', 'a cold session is left alone');
+    assert.equal(injected(ups('fix the failing test', hot)), '', 'an ordinary prompt is never touched');
+    assert.equal(injected(ups('/help', hot)), '', 'a slash that is not an orchestration run passes');
+    assert.equal(injected(ups('/project-quality-loop', hot, { CLAUDE_STACK_FRESH_SESSION_PCT: '0' })), '', '0 disables this route too');
+
+    // SessionStart measures nothing - the transcript has just been replaced by its summary - so the
+    // compaction event itself is the evidence.
+    assert.match(injected(start('compact')), /just AUTO-COMPACTED/, 'a compaction carries the offer');
+    assert.equal(injected(start('startup')), '', 'an ordinary session start does not');
+    assert.equal(injected(start('compact', { CLAUDE_STACK_FRESH_SESSION_PCT: '0' })), '', 'and 0 disables it');
+
+    // the Skill route is unchanged, and the widened list reaches the review seats
+    assert.equal(askLoop(hot, winEnv()), 2, 'the Skill route still BLOCKS');
+    assert.equal(runIn('guard-fresh-session-start.js',
+        { tool_name: 'Skill', tool_input: { skill: 'project-verify-code' }, transcript_path: hot }, { env: winEnv() }).status, 2,
+        'project-verify-code is orchestration - measured starting at 364.6k ctx');
+});
+
 test('fresh-session window: the account settings model id names the tier before any usage proves it', () => {
     // The ONE readable source that keeps the window suffix (the transcript records `claude-opus-5`
     // with the [1m] stripped). 190k is past the 150k floor on the 200k tier and nowhere near 40%
@@ -751,19 +1018,21 @@ test('fresh-session window: CLAUDE_STACK_CONTEXT_WINDOW is the user\'s own state
 test('fresh-session window: a percentage below 76 is not inert on a declared 1M window', () => {
     // The report: raising the percentage to 40 changed nothing, because 200k x anything up to 75%
     // is still under the 150k floor. On a known 1M window the percentage IS the setting.
-    const at300 = ctxAt('win-pct-300k', 300000);
+    const at160 = ctxAt('win-pct-160k', 160000);
     const env = (pct) => winEnv({ CLAUDE_STACK_CONTEXT_WINDOW: '1000000', CLAUDE_STACK_FRESH_SESSION_PCT: pct });
-    assert.equal(askLoop(at300, env('40')), 0, '300k is under 40% of 1M');
-    assert.equal(askLoop(at300, env('20')), 2, '... and past 20% of it');
-    assert.equal(askLoop(at300, env('0')), 0, '0 still disables the gate outright');
+    assert.equal(askLoop(at160, env('40')), 0, '160k is under the trigger a declared 1M window gives it');
+    assert.equal(askLoop(at160, env('15')), 2, '... and past 15% of it');
+    assert.equal(askLoop(at160, env('0')), 0, '0 still disables the gate outright');
+    // and the 250k ceiling caps what any percentage can ask for
+    assert.equal(askLoop(ctxAt('win-pct-300k', 300000), env('60')), 2, '60% of 1M is 600k, but the trigger is capped at 250k');
 });
 
 test('fresh-session window: a proven 1M tier is latched, so it survives the proof scrolling out', () => {
     // maxCtxSeen reads a 512KB TAIL: a long session's early 200k crossing scrolls out of it, and
     // the tier regressed from 400k back to 150k mid-session.
     const env = winEnv();
-    const tp = ctxAt('win-latch', 300000);
-    assert.equal(askLoop(tp, env), 0, '300k proves the 1M tier and is under 40% of it');
+    const tp = ctxAt('win-latch', 220000);
+    assert.equal(askLoop(tp, env), 0, '220k proves the 1M tier and is under its 250k trigger');
     fs.writeFileSync(tp, JSON.stringify(assistantRow('later', 'ok', { cache_read_input_tokens: 190000 })) + '\n');
     assert.equal(askLoop(tp, env), 0, 'the same session at 190k keeps the 1M tier');
     assert.equal(askLoop(tp, winEnv()), 2, 'a different session with no latch reads the 200k tier');
@@ -777,7 +1046,49 @@ test('stop contract: the fresh-session offer reads the window the same three way
     const hot = at('stopwin-190k', 190000);
 
     assert.equal(stop(hot, winEnv()), 2, '190k with nothing declared: the 200k tier and its 150k floor');
-    assert.equal(stop(hot, winEnv({ CLAUDE_CONFIG_DIR: accountDir('stop-acct-1m', 'opus[1m]') })), 0, 'a 1M model id lifts it to 400k');
+    assert.equal(stop(hot, winEnv({ CLAUDE_CONFIG_DIR: accountDir('stop-acct-1m', 'opus[1m]') })), 0, 'a 1M model id lifts it past 190k');
     assert.equal(stop(hot, winEnv({ CLAUDE_STACK_CONTEXT_WINDOW: '1000000' })), 0, 'so does the declared window');
     assert.equal(stop(at('stopwin-450k', 450000), winEnv({ CLAUDE_STACK_CONTEXT_WINDOW: '1000000' })), 2, 'and 450k is past 40% of it');
+});
+
+test('guard-answer-length: the cap holds, and never deletes a report field or a self-correction', () => {
+  // Measured damage: a forced re-answer went 3,184 -> 1,085 chars and took TWO of five headline
+  // findings and a self-correction disclosure with it. Both exemptions are narrow on purpose -
+  // 'Recommendation first' is the house answer shape, so a bolded lead-in must NOT lift the cap.
+  const filler = 'This is filler prose that says very little but goes on and on about the process. '.repeat(40);
+  const answer = (userText, text) => run('guard-answer-length.js', {
+    hook_event_name: 'Stop',
+    session_id: 's',
+    cwd: TMP,
+    transcript_path: transcript(`al-${Math.random().toString(36).slice(2)}`, [
+      { type: 'user', message: { content: userText } },
+      assistantRow('a1', text),
+    ]),
+  });
+  assert.equal(answer('which one?', `**Recommendation:** use option B. ${filler}`), 2, 'a bolded lead-in is not a mandated field');
+  assert.equal(answer('which one?', `Sorry about that. ${filler}`), 2, "'sorry' is not a self-correction");
+  assert.equal(answer('which one?', 'Use option B.'), 0, 'an answer at budget passes');
+  assert.equal(answer('which one?', `## Findings\n\n${filler}`), 0, "a skill's own report field is exempt");
+  assert.equal(answer('which one?', `I was wrong about the threshold earlier. ${filler}`), 0, 'a self-correction is exempt');
+  assert.equal(answer('walk me through it', filler), 0, "the user's own depth request still lifts the cap");
+});
+
+test('guard-read-whole-file: a shell touch names the convention rule the file tools would have attached', () => {
+  // Measured with a control: 19 Bash calls naming .cs files -> 0 attachments, while the session's
+  // single Read-tool call on a .cs file attached BOTH .cs-scoped rules 0.94 s later. Under a
+  // Bash-first mode the nine path-scoped rules are simply OFF.
+  const call = (command, session_id) => runIn('guard-read-whole-file.js', { tool_name: 'Bash', tool_input: { command }, session_id }, {});
+  const ctxOf = (r) => { try { return JSON.parse(r.stdout).hookSpecificOutput.additionalContext; } catch { return ''; } };
+  const s1 = `m5-${Math.random().toString(36).slice(2)}`;
+  assert.match(ctxOf(call("grep -rn 'IOrderService' src/Api/Orders.cs", s1)), /csharp-conventions\.md/, 'a grep is a touch');
+  assert.equal(ctxOf(call('dotnet build && grep -n x src/Api/Orders.cs', s1)), '', 'once per rule per session');
+  assert.match(ctxOf(call('wc -l README.md', s1)), /markdown-docs\.md/, 'a different rule still announces');
+  assert.equal(ctxOf(call('ls -la', s1)), '', 'a command naming nothing governed is silent');
+  assert.equal(ctxOf(call(`cat <<'EOF' > plan.md\nedit src/Thing.sql later\nEOF`, s1)), '', 'a heredoc body is prose, not a touch');
+  // a denial and an injection are two answers to one call: the rule is not spent on a blocked command
+  const s2 = `m5-${Math.random().toString(36).slice(2)}`;
+  const blocked = call(`cat ${BIG.replace(/\.js$/, '.js')}`, s2);
+  assert.equal(blocked.status, 2, 'a whole-file dump of a large .js file is still blocked');
+  assert.equal(ctxOf(blocked), '', 'and announces nothing');
+  assert.match(ctxOf(call(`grep -n Foo ${BIG}`, s2)), /javascript-conventions\.md/, 'the next allowed touch still gets it');
 });

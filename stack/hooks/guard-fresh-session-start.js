@@ -1,7 +1,20 @@
 #!/usr/bin/env node
 // installer-managed - update overwrites local edits; put project policy in a separate hook file.
-// PreToolUse (Skill): a DELIBERATE orchestration skill - a capture, a loop, a solve flow - must
-// start in a session that is not already carrying a finished run's history. The rule existed as
+// Three routes into ONE decision: a DELIBERATE orchestration run - a capture, a loop, a solve
+// flow - must start in a session that is not already carrying a finished run's history.
+//   PreToolUse (Skill)      - the run arrives as a Skill call. Blocks (exit 2).
+//   UserPromptSubmit        - the run arrives as a SLASH COMMAND, which emits NO Skill event at
+//                             all: measured 4 of 4 runs slash-injected, ZERO Skill tool_use events
+//                             in 45 messages, two captures entered at 150k and 164k, both ungated.
+//                             This route INJECTS the ask; it never denies, because a
+//                             UserPromptSubmit exit 2 ERASES the user's prompt and shows the
+//                             reason to the user only - the run would be lost and the model would
+//                             never learn why.
+//   SessionStart (compact)  - the harness has just auto-compacted, which is PROOF the session
+//                             reached the ceiling the gate exists for (~390k measured across three
+//                             projects), at a moment a Stop may never come (measured: 23m27s /
+//                             277 messages / +178k ctx, zero Stop events; and a conforming
+//                             solve-task run emits zero Stops BY DESIGN). Injects, cannot block. The rule existed as
 // prose in the generated capabilities rule and lost every time it was tested: measured across 4
 // sessions, one of which NAMED the fresh-session need in its own text ('a fresh session is the
 // right home for a loop like this') and then ran the loop anyway, to 380k tokens per message.
@@ -41,7 +54,10 @@ if (!payload || typeof payload !== 'object') process.exit(0); // a JSON scalar/n
         const fs = require('fs');
         const path = require('path');
         const root = process.env.CLAUDE_PROJECT_DIR || payload.cwd || process.cwd();
-        const dir = path.join(root, docsRootEnv(), 'hook-blocks');
+        // resolve, NOT join: an ABSOLUTE CLAUDE_STACK_DOCS_PATH makes path.join('/a/b','/x/y')
+        // '/a/b/x/y', so every ledger row landed in a doubled path that nothing reads (measured
+        // across all ten guards). resolve honours an absolute value and still joins a relative one.
+        const dir = path.resolve(root, docsRootEnv(), 'hook-blocks');
         fs.mkdirSync(dir, { recursive: true });
         fs.appendFileSync(path.join(dir, `${payload.session_id || 'nosession'}.jsonl`), JSON.stringify({
           ts: new Date().toISOString(),
@@ -55,7 +71,9 @@ if (!payload || typeof payload !== 'object') process.exit(0); // a JSON scalar/n
     exit(code);
   };
 })();
-if (payload.tool_name !== 'Skill') process.exit(0);
+const EVENT = payload.hook_event_name || '';
+const IS_SKILL_CALL = payload.tool_name === 'Skill';
+if (!IS_SKILL_CALL && EVENT !== 'UserPromptSubmit' && EVENT !== 'SessionStart') process.exit(0);
 
 // The trigger scales with the CONTEXT WINDOW, not a flat token count. A fixed 150k is ~75% of a
 // 200k window (where it was measured) but only 15% of a 1M-context session, which is why it fired
@@ -66,12 +84,18 @@ const _pct = parseInt(process.env.CLAUDE_STACK_FRESH_SESSION_PCT, 10);
 // 0 DISABLES the gate outright - a `|| 40` fallback silently turned the off switch back on.
 const FRESH_PCT = _pct === 0 ? 0 : Math.min(95, Math.max(5, Number.isNaN(_pct) ? 40 : _pct));
 const CTX_FLOOR = 150000;
+// The upper bound on any window larger than 200k - see ctxThreshold. Without it the trigger lands
+// above the harness's own auto-compact ceiling and the gate can never fire. Keep in sync with the
+// identical constant in guard-stop-contract.js.
+const CTX_CEILING = 250000;
 
 // --- which context WINDOW is this session running in? -------------------------------------
 // Measured on a 1M session: the transcript's message.model records `claude-opus-5` with the
 // `[1m]` suffix STRIPPED, the PreToolUse payload carries only cwd/session_id/tool_name/
 // tool_input/transcript_path, no transcript field names a window or a token limit, and no env
-// var carries the model. The ONE readable source that keeps the suffix is settings.json's
+// var carries the model. settings.json's `model` keeps it - and so does the transcript's own
+// `cost-state` record (`modelUsage` is keyed `claude-opus-5[1m]`), which the earlier text
+// wrongly called the ONLY source; measured on CLI 2.1.258 and 2.1.261. settings.json's
 // `model` (e.g. `opus[1m]`). So, first layer that resolves wins:
 //   1. CLAUDE_STACK_CONTEXT_WINDOW - the user's own statement, so it outranks every guess. It
 //      goes in the scope settings.json `env` block, seeded `1000000` by the installer and meant to
@@ -151,13 +175,56 @@ function ctxThreshold(proveTier) {
   const pct = Math.round((window * FRESH_PCT) / 100);
   // The floor is the MEASURED 200k-tier behaviour, kept so those sessions are unchanged; a window
   // known to be larger is never clamped back down to it (on 1M the percentage IS the setting).
-  return window > 200000 ? pct : Math.max(CTX_FLOOR, pct);
+  // Above the 200k tier the PERCENTAGE ALONE IS UNUSABLE: the FRESH_PCT default (40) is the SAME
+  // NUMBER as the harness's own auto-compact percentage, so 40% of 1M is 400,000 - above the
+  // ceiling the harness actually enforces (measured 387,619-397,171 across three projects). The
+  // gate could never fire on a 1M account. Identical to guard-stop-contract.js's copy.
+  return window > 200000 ? Math.min(pct, CTX_CEILING) : Math.max(CTX_FLOOR, pct);
 }
 // The deliberate entry points: each one opens a multi-phase run with its own state file, so a
 // fresh session resuming from that file is always cheaper than continuing on carried context.
-const ORCHESTRATION = /^(project-(quality-loop|architecture-quality-loop|test-coverage-loop|architecture-analyzer|code-style-analyzer|test-coverage-analyzer|solve-task|solve-cross-task|build-from-scratch|stack-usage-analyzer|related-context|version-upgrade|diagnose-failure))$/;
-const skill = String((payload.tool_input || {}).skill || (payload.tool_input || {}).name || '');
-if (!ORCHESTRATION.test(skill.replace(/^.*:/, ''))) process.exit(0);
+// The review and per-phase seats are here because they are the same population, measured: one
+// session started `project-verify-code` at 364.6k and `security-review` at 383.1k, together 13.7M
+// cache-read - 27% of the whole session - for 20.5k of output, and the offer arrived nine minutes
+// after that spend. `project-agent-capabilities` is here because the stack's own next-steps card
+// tells the user to run it after every update. The four guided plugin commands are here because
+// they are multi-phase walks too, and the UserPromptSubmit route is what finally reaches them.
+const ORCHESTRATION = /^(project-(quality-loop|architecture-quality-loop|test-coverage-loop|architecture-analyzer|code-style-analyzer|test-coverage-analyzer|solve-task|solve-cross-task|build-from-scratch|stack-usage-analyzer|related-context|version-upgrade|diagnose-failure|solution-design|verify-plan|implementer|verify-code|agent-capabilities)|security-review|claude-stack:(setup|update|configure|validate))$/;
+// a plugin-namespaced Skill call arrives as `<plugin>:<skill>`; the four guided commands are
+// matched on their FULL name, so a bare `/setup` from some other plugin is not read as one of them
+const isOrchestration = (n) => ORCHESTRATION.test(n) || ORCHESTRATION.test(n.replace(/^.*:/, ''));
+let skill = '';
+if (IS_SKILL_CALL) {
+  skill = String((payload.tool_input || {}).skill || (payload.tool_input || {}).name || '');
+} else if (EVENT === 'UserPromptSubmit') {
+  // A slash turn reaches this event as the expanded prompt: the harness wraps the invocation in a
+  // `<command-name>` marker (confirmed twice from live transcripts, matching origin.kind 'human'),
+  // and a hand-typed `/name` is the same intent spelled without it.
+  const prompt = String(payload.prompt || '');
+  const m = prompt.match(/<command-name>\s*\/?([A-Za-z0-9:_-]+)\s*<\/command-name>/)
+    || prompt.match(/(?:^|\s)\/([A-Za-z0-9:_-]+)/);
+  skill = m ? m[1] : '';
+}
+if (EVENT !== 'SessionStart' && !isOrchestration(skill)) process.exit(0);
+
+// SessionStart carries no run name and nothing measurable - the transcript has just been REPLACED
+// by its summary - so the compaction event itself is the evidence, and the offer goes out on it.
+if (EVENT === 'SessionStart') {
+  if (FRESH_PCT === 0 || String(payload.source || '') !== 'compact') process.exit(0);
+  process.stdout.write(JSON.stringify({
+    hookSpecificOutput: {
+      hookEventName: 'SessionStart',
+      additionalContext:
+        'This session just AUTO-COMPACTED, which means it reached the harness ceiling (~390k ' +
+        'tokens per message measured) and the harness - not the user - decided what to drop. ' +
+        'Before continuing, put the choice to the user as ONE AskUserQuestion: resume in a fresh ' +
+        'session (recommended - end this turn with the paste-ready invocation and the state file ' +
+        'or plan file it resumes from), or continue here on the summary with the cost stated. If ' +
+        'the remaining work is a single short step, say so and just finish it instead of asking.',
+    },
+  }));
+  process.exit(0);
+}
 
 // Context comes from the last assistant message's usage, same source the stop contract uses.
 function lastUsage() {
@@ -192,6 +259,24 @@ const usage = lastUsage();
 if (!usage) process.exit(0);
 const ctx = (usage.cache_read_input_tokens || 0) + (usage.cache_creation_input_tokens || 0) + (usage.input_tokens || 0);
 if (FRESH_PCT === 0 || ctx <= ctxThreshold(() => usage._maxCtx || ctx)) process.exit(0);
+
+// UserPromptSubmit can only ADD context - exit 2 there erases the prompt and tells the user, not
+// the model - so the slash route states the same thing as an instruction and lets the model ask.
+if (EVENT === 'UserPromptSubmit') {
+  process.stdout.write(JSON.stringify({
+    hookSpecificOutput: {
+      hookEventName: 'UserPromptSubmit',
+      additionalContext:
+        `/${skill} is a deliberate orchestration run and this session already carries ` +
+        `~${Math.round(ctx / 1000)}k tokens per message of another run's history - every turn of the new ` +
+        `run re-sends all of it (measured: the same step cost 260k/message chained vs 134k fresh). ` +
+        `Do NOT start the run yet. Put it to the user as ONE AskUserQuestion: start it in a fresh ` +
+        `session (recommended - end this turn with the paste-ready invocation and the state file it ` +
+        `resumes from), or run it here anyway with the cost stated.`,
+    },
+  }));
+  process.exit(0);
+}
 
 process.stderr.write(
   `Blocked: ${skill} is a deliberate orchestration run and this session already carries\n` +

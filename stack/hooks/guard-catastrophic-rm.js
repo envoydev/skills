@@ -193,7 +193,10 @@ function main()
                 {
                     const path = require('path');
                     const root = process.env.CLAUDE_PROJECT_DIR || payload.cwd || process.cwd();
-                    const dir = path.join(root, docsRootEnv(), 'hook-blocks');
+                    // resolve, NOT join: an ABSOLUTE CLAUDE_STACK_DOCS_PATH makes path.join('/a/b','/x/y')
+        // '/a/b/x/y', so every ledger row landed in a doubled path that nothing reads (measured
+        // across all ten guards). resolve honours an absolute value and still joins a relative one.
+        const dir = path.resolve(root, docsRootEnv(), 'hook-blocks');
                     fs.mkdirSync(dir, { recursive: true });
                     fs.appendFileSync(path.join(dir, `${payload.session_id || 'nosession'}.jsonl`), JSON.stringify({
                         ts: new Date().toISOString(),
@@ -210,6 +213,48 @@ function main()
     })();
 
     const command = stripHeredocs(payload?.tool_input?.command ?? '');
+
+    // Git destroys uncommitted work with no undo, and this guard had ZERO git coverage: 225 lines
+    // with no occurrence of `git`, so a destructive `git checkout --` replayed exit 0 against every
+    // guard in the stack. These four verbs are the same class as a recursive rm - the working tree
+    // is the only copy - and unlike a commit there is no reflog entry to recover from.
+    // Gated on ACTUAL loss: a clean tree has nothing to destroy, so the command passes. That is the
+    // same arithmetic the commit gate's trivial-diff exemption uses, and it keeps the guard silent
+    // in the overwhelmingly common case of resetting an already-clean checkout.
+    const destructiveGit = /(?:^|[;&|(]\s*|\s)git(?:\s+-[cC]\s*\S+|\s+--\S+)*\s+(?:checkout\s+(?:--\s|\.(?:\s|$))|restore\s+(?!(?:--staged|--source)\b)|reset\s+--hard\b|clean\s+-\S*[fx])/;
+    // A QUOTED span is data, exactly as it is in the commit guard: an echo, a plan sentence or a
+    // grep pattern that merely CONTAINS `git reset --hard` invokes nothing, and denying it teaches
+    // the obfuscation that then defeats this gate on a real one. The fill is a NON-space so the
+    // span stays one opaque argument token and the offsets survive.
+    const gitScan = command
+        .replace(/'[^'\n]*'/g, (m) => m.replace(/[^\n]/g, 'x'))
+        .replace(/"[^"\n]*"/g, (m) => m.replace(/[^\n]/g, 'x'));
+    if (destructiveGit.test(gitScan))
+    {
+        let dirty = '';
+        try
+        {
+            const { execSync } = require('child_process');
+            const root = process.env.CLAUDE_PROJECT_DIR || payload.cwd || process.cwd();
+            dirty = execSync('git status --porcelain', { cwd: root, timeout: 5000 }).toString().trim();
+        }
+        catch { dirty = ''; } // not a git repo / git unavailable - never block on our own failure
+        if (dirty)
+        {
+            const rows = dirty.split('\n');
+            process.stderr.write(
+                `Blocked: this discards uncommitted work in ${rows.length} file(s), and there is no reflog for a\n` +
+                `working tree - once it is gone it is gone (CLAUDE.md's rm rule, same class).\n` +
+                rows.slice(0, 10).map((r) => `  ${r}`).join('\n') +
+                (rows.length > 10 ? `\n  ... and ${rows.length - 10} more` : '') +
+                `\n\nIf the loss is intended, say so to the user first and get their word. Otherwise keep the\n` +
+                `work: \`git stash -u\` (recoverable), or commit it, or name the ONE file to revert instead of\n` +
+                `the whole tree. A clean tree passes this gate untouched.`,
+            );
+            process.exit(2);
+        }
+    }
+
     if (!isCatastrophicRm(command))
     {
         process.exit(0);

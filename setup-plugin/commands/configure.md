@@ -13,6 +13,16 @@ the recommendations - every layer is a straight modify, no recommended phase - a
 `update`, not `install`. (For a no-questions refresh that also prunes what upstream removed, the
 sibling `update` command is the shorter path - this command is for CHOOSING what changes.)
 
+**This run needs NO conversation context - decide WHERE to run it first.** Before anything
+downloads, put it through AskUserQuestion: run here anyway, or run in a fresh session
+(recommended). Quote THIS session's own per-message context (`input + cache_read +
+cache_creation` off the last assistant message) against the run's own budget - never a figure
+measured in some other session. Every answer names its next action: fresh session -> give the
+paste-ready one-liner and end the turn; run here -> start step 1 now; not now -> say what is
+owed and end the turn. If a redirect displaces the ask, re-offer it ONCE. Measured: this
+command's siblings entered at 131,345 and 168,516 tokens per message with no ask at all, and
+one of them authored its own prose decision that was never put to the user.
+
 **ONE release archive is the entire download** - the shared contract lives at
 `${CLAUDE_PLUGIN_ROOT}/references/source-protocol.md`; read it first and hold the whole run to
 it: download + extract once into `$TMP/repo` (the reference owns the fallback), use every tool
@@ -245,7 +255,7 @@ The values come from the snapshot's `$TMP/repo/meta/environment.json` - the ONE 
 release owns in the scope's settings.json `env` (`.claude/settings.json`, or the account file for a
 global install). Read each row's `key`, `default` and `what` FROM THAT FILE and put the `what` in
 front of the user in its own words; do not carry a copy of the rows here, or the walk shows five
-values on the day the catalog holds six. The installer seeds every row only when ABSENT, so this
+values on the day the catalog holds six. **Never print, echo back, or ask for a credential VALUE.** A key matching the catalog's `secret_key_pattern`, or a row flagged `secret: true`, is reported as `set (N chars)` or `absent` and nothing else - not as a shown default, not in a table, not in a question. A value that must be set is set by the user in the file itself, or with a copy-ready command they run in their own terminal; it never travels through the chat. Measured: seven credential exposures in one corpus. The installer seeds every row only when ABSENT, so this
 step is the one place they change deliberately. A row whose key is missing from the file is one the
 release INTRODUCED - offer it with the catalog's default; a row's `renamed_from` still present on
 disk is the old spelling, and accepting it moves the value, never resets it.
@@ -272,7 +282,7 @@ skipped, or nothing changed: one narration line, nothing written.
 
 ## 10. Prerequisite check
 
-Run: `node stack-select.js --selection raw.json --emit selection.txt --check [--sentry-oauth] [--config-dir ~/.claude-<space>]`
+Run: `node stack-select.js --selection "$TMP/raw.json" --emit "$TMP/selection.txt" --check [--sentry-oauth] [--config-dir ~/.claude-<space>]`
 (`--sentry-oauth` when sentry is kept under a headerless registration, so its token warning does not
 fire falsely; `--config-dir` under a `--space` profile, so the env probe reads that account's
 settings.json), output redirected to `$TMP/select.out` like every recompute. **Fixed shape, three blocks:** (1) one
@@ -290,11 +300,18 @@ run - an existing install often carries deliberate pin edits).
 
 ## 11. Update + removals
 
-Run the installer **from the snapshot**, passing it back with `--source` so the run lands the
-same revision step 1 previewed:
+**First, is there anything to do?** This run already computed the closed selection and already has
+the installed inventory. When the two are byte-identical AND no removals were accepted AND no env
+or plugin-settings change was chosen, print ONE line - `unchanged - nothing to install, nothing to
+remove` - and skip to step 12. Do not run the installer to prove it (measured: a run whose
+selection it had itself proved identical spent 2 API messages and 351,777 re-sent tokens on an
+installer pass whose only real effect was resetting the agent model/effort pins).
 
-- Unix: `bash "$TMP/repo/scripts/os/claude-stack.sh" update --source "$TMP/repo" --scope <scope> --selection selection.txt [--space <name>] [--keep-pins] [--sentry-slug <slug>] [--sentry-auth token|oauth]`
-- Windows: `pwsh -File "$TMP/repo/scripts/os/claude-stack.ps1" update -Source "$TMP/repo" -Scope <scope> -Selection selection.txt [-Space <name>] [-KeepPins] [-SentrySlug <slug>] [-SentryAuth token|oauth]`
+Otherwise, run the installer **from the snapshot**, passing it back with `--source` so the run
+lands the same revision step 1 previewed:
+
+- Unix: `bash "$TMP/repo/scripts/os/claude-stack.sh" update --source "$TMP/repo" --scope <scope> --selection "$TMP/selection.txt" [--space <name>] [--keep-pins] [--sentry-slug <slug>] [--sentry-auth token|oauth]`
+- Windows: `pwsh -File "$TMP/repo/scripts/os/claude-stack.ps1" update -Source "$TMP/repo" -Scope <scope> -Selection "$TMP/selection.txt" [-Space <name>] [-KeepPins] [-SentrySlug <slug>] [-SentryAuth token|oauth]`
 - Scope/space mirror how the install was laid down (project install -> `project`; account
   install -> `global`, with the space that owns it) - ask only when it is genuinely ambiguous.
 
@@ -336,6 +353,14 @@ Report what changed per category (refreshed / added / dropped, orphans removed v
 CLAUDE.md decision and reconcile result, anything deferred, and remind that a restart picks up
 MCP registration changes. The run rewrites `claude-stack.stamp` to the revision it installed, so
 the next configure diffs from here.
+
+**A next step that needs a USER ACTION in this session ends the turn in ONE AskUserQuestion.**
+A listed next step is a directive, and three of them shipped as prose in one session and all
+three were ignored. So: after the report, if any listed step is something the user must decide
+or run now - re-index serena, run a manual-only capture skill, restart for an MCP change, rotate
+a credential - put those steps through AskUserQuestion as the turn's last act, one option per
+step plus 'nothing now'. Steps that are purely informational stay in the report and end nothing.
+
 
 ## Clean up the temp dir - ALWAYS
 

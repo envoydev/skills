@@ -1,5 +1,6 @@
 {
-  "_comment": "The environment values this stack owns in the scope's settings.json `env` block (the project's .claude/settings.json, or the account file for a global install). ONE source for the three guided commands: setup asks the `ask: true` rows on its environment screen, configure step 9 shows and changes them, validate reconciles what is on disk against this list - a row absent from the file is a MISSING key the release introduced, a `renamed_from` still present is the old spelling, and a value failing `validate` is flagged with the expected shape. The installers seed every row ABSENT-ONLY on install and update (and apply the renames first, value carried over), so this catalog and the two installer twins must agree - `npm run lint` fails when they drift. Adding a variable: add the row here, seed it in both twins, and, when it replaces an older name, add the rename pair to migrations.json and give every consumer an old-name fallback.",
+  "_comment": "The environment values this stack owns in the scope's settings.json `env` block (the project's .claude/settings.json, or the account file for a global install). ONE source for the three guided commands: setup asks the `ask: true` rows on its environment screen, configure step 9 shows and changes them, validate reconciles what is on disk against this list - a row absent from the file is a MISSING key the release introduced, a `renamed_from` still present is the old spelling, and a value failing `validate` is flagged with the expected shape. The installers seed every row ABSENT-ONLY on install and update (and apply the renames first, value carried over), so this catalog and the two installer twins must agree - `npm run lint` fails when they drift. Adding a variable: add the row here, seed it in both twins, and, when it replaces an older name, add the rename pair to migrations.json and give every consumer an old-name fallback. A row may also carry `secret: true`, and any key matching `secret_key_pattern` is treated the same way whether or not it has a row: its VALUE is never printed, never echoed back as a default, and never asked for through the chat - the walks report `set (N chars)` or `absent` and point the user at the file. Measured: seven credential exposures across one corpus, one of them an account settings.json read whole as a session's first tool call. A change to ANY of these takes effect on the NEXT TOOL CALL - every hook reads its value per invocation - so no session restart is ever needed. State that when reporting a flip: a run once told the user to restart, and `grep -rn restart` over stack/, meta/, scripts/ and setup-plugin/ found no such claim anywhere, so the model had invented it (the instrumentation ledger's first row in fact landed 27.2 s later in the same session, covering 63 of 65 calls). A fact about the stack's own behaviour that the stack does not state gets invented.",
+  "secret_key_pattern": "(TOKEN|SECRET|KEY|PASSWORD|PASSWD|DSN|CREDENTIAL|AUTH)$",
   "env": [
     {
       "key": "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE",
@@ -26,7 +27,20 @@
       "key": "CLAUDE_STACK_INSTRUMENT",
       "default": "0",
       "ask": true,
-      "what": "the tool-usage instrumentation switch. `0` costs a shell test per call and records nothing; `1` logs every tool call as one JSONL row for a measured run, then goes back to `0`.",
+      "what": "the tool-usage instrumentation switch. `0` costs a shell test per call and records nothing; `1` logs every tool call as one JSONL row for a measured run, then goes back to `0`. Flipping it takes effect on the next tool call; no session restart is needed.",
+      "validate": {
+        "type": "enum",
+        "values": [
+          "0",
+          "1"
+        ]
+      }
+    },
+    {
+      "key": "CLAUDE_STACK_PUSH_GATE",
+      "default": "1",
+      "ask": false,
+      "what": "the PUBLISH half of the commit gate: `git push` and `gh pr merge` need a `<docs-path>/flow/PUSH-GATE` receipt, the same shape the commit gate uses. Set `0` for a repo whose remote is already gated (branch protection, a required review). Measured: across four sessions every push and merge passed every guard - one published unpushed commits 18 minutes before any receipt existed, another put 40 files on a shared `develop`.",
       "validate": {
         "type": "enum",
         "values": [
@@ -39,7 +53,7 @@
       "key": "CLAUDE_STACK_FRESH_SESSION_PCT",
       "default": "40",
       "ask": true,
-      "what": "how much of the context window a session may carry before an orchestration run (a capture, a loop, a solve flow) is offered a fresh session instead. `0` turns the gate off. On the auto-detected 200k tier it is INERT below 76 - the trigger keeps the measured 150k floor - so it bites on a 1M window, where 40% is 400k.",
+      "what": "how much of the context window a session may carry before an orchestration run (a capture, a loop, a solve flow) is offered a fresh session instead. `0` turns the gate off. On the auto-detected 200k tier it is INERT below 76 - the trigger keeps the measured 150k floor. Above that tier the trigger is CAPPED at 250k whatever the percentage says, because the harness auto-compacts at ~390k and a trigger above that ceiling can never fire.",
       "validate": {
         "type": "percent",
         "min": 5,
@@ -49,10 +63,10 @@
     },
     {
       "key": "CLAUDE_STACK_CONTEXT_WINDOW",
-      "default": "1000000",
+      "default": "",
       "ask": true,
       "asked_with": "CLAUDE_STACK_FRESH_SESSION_PCT",
-      "what": "the context window that percentage applies to, seeded `1000000` - a stated number, since an empty box stays empty and the auto-detect below it only resolves on some machines. SET IT TO `200000` ON A 200k MODEL: the value outranks detection, so a 1M window declared on a 200k session moves the trigger from 150k to 400k and the gate stops firing. Clearing it restores auto-detect - the gate then reads the settings model id's own window suffix (`opus[1m]`), else infers the tier from what the session has already carried.",
+      "what": "the context window that percentage applies to. Leave it EMPTY - empty MEANS auto-detect, and that is the right answer on every machine: the gate reads the settings model id's own window suffix (`opus[1m]`), else infers the tier from what the session has already carried. It used to be seeded `1000000`, which killed the gate on every install that was not a 1M account - this value is the FIRST layer of the resolution, so a stated 1M window on a 200k session put the trigger above anything that session can ever carry. Fill it in (`1000000` / `200000`) only to OVERRULE detection.",
       "validate": {
         "type": "int-or-empty",
         "min": 100000

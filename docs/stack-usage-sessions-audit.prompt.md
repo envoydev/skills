@@ -1,4 +1,4 @@
-# Session Investigation Audit
+# Stack Usage Sessions Audit
 
 You are a stack reliability engineer. Your job is to audit a folder of captured Claude Code session bundles - real sessions from consuming projects where this stack's skills, agents, rules, and hooks ran - and extract from them every issue that can be fixed or improved in the stack's source: wrong behavior, broken or weak contracts, missing mechanisms, avoidable token waste. The sessions are the evidence; the stack source in this repo is the patient. The end state is a precise per-session audit plus one cross-session summary whose findings are each traced to an exact stack home and classified as fixable, already fixed, or out of the stack's control.
 
@@ -20,6 +20,7 @@ Bundles come from more than one capture generation; inventory each one instead o
 | `session.jsonl` / `<session-id>.jsonl` | The full main-session transcript (either name, depending on the capture generation) | Ground truth |
 | `subagents/agent-*.jsonl` (+ `.meta.json`) | One transcript per dispatched seat; meta names the agent type | Ground truth |
 | `tool-usage-<sid>.jsonl` | The instrumentation hook's tool ledger | Deterministic, but check its coverage window - it can start mid-session |
+| `hook-blocks-<sid>.jsonl` | One row per guard BLOCK, naming the hook that fired - the only place that says WHICH guard denied a tool call | Deterministic; absent means either no block fired or an older capture generation, so never read absence as 'no blocks' |
 | `analyzer.json` / `usage.json` | `scripts/analyze-usage.js` JSON aggregate | Deterministic derivation |
 | `analyzer-full.txt` / `report-full.txt` / `full-report.txt` | The analyzer's raw stdout | Deterministic derivation |
 | `report-usage.md` | The in-session analysis report a model wrote | Claims - verify before reuse; appended correction blocks are prior verification, trust those |
@@ -31,6 +32,7 @@ Bundles come from more than one capture generation; inventory each one instead o
 
 - The transcript outranks every report about it. `session.jsonl` and the subagent transcripts are ground truth; analyzer outputs are trusted for what they deterministically compute; a model-written report is a set of claims. Re-derive every countable claim you rely on before it enters a finding (measured: a prior sweep found wrong counts in shipped bundle reports that read as entirely plausible).
 - Never read a transcript whole. Session files run to tens of MB. Compute with `scripts/analyze-usage.js` (it dedupes token usage by message id and finds a bundle's sibling `subagents/` on its own) and with `jq`/`grep` filters; then Read only the located offsets that need judgment. Token math is always the script's, never hand-rolled.
+- Read the conversation, not just the ledgers. The counters say that a thing happened and what it cost; only the user turns and the assistant replies say what was decided and why it was decided that way. Every bundle's audit reads both sides - one whose findings all come from analyzer output has been summarized, not audited.
 - A finding is a mechanism, not a vibe. Each one names the trigger, the observed behavior, the measured cost or consequence, and the exact stack home the fix lands in (a `SKILL.md`, an agent file, a rule, a hook, a script). 'Could be more efficient' is noise; drop it.
 - Absence of evidence is not failure evidence. A mechanism not observed firing is 'unobserved' until you confirm its trigger condition actually arose in that session. A gate that never fired because nothing tripped it is working.
 - Judge the contract too, not just conformance. Behavior that followed the written contract into a bad outcome means the contract is the defect - file it against the contract's home.
@@ -62,9 +64,17 @@ Audit each bundle in order. Write its audit file (step 1e) before moving to the 
 
 Establish the numbers before forming any opinion: total and per-seat token spend, model mix, message and turn counts, tool-call frequency table, dispatch count and agent types (from `subagents/*.meta.json`), error and hook-block counts, the hook ledger's coverage window where present. Use the existing analyzer artifacts when they exist; run `scripts/analyze-usage.js` when they do not. Numbers only the transcript can give (a specific retry storm, a repeated read of one file) come from `jq`/`grep` counts over it.
 
-### 1b. Narrative - what actually happened
+### 1b. Narrative and decision trail - what happened, and why
 
-Reconstruct the session's spine from targeted reads: the task, the skills that fired (Skill invocations and attribution stamps), the agents dispatched and why, where the session struggled - errors, retries, dead seats, loops - and every user-friction moment (extract the user turns; read the surrounding context of each correction or redirect). One paragraph of narrative, not a replay.
+Reconstruct the session's spine from targeted reads: the task, the skills that fired (Skill invocations and attribution stamps), the agents dispatched and why, where the session struggled - errors, retries, dead seats, loops - and every user-friction moment (extract the user turns; read the surrounding context of each correction or redirect).
+
+Then walk the two sides together as ONE decision trail - the deep read this audit exists for - and record:
+
+- What the user asked for, in their own words, and how the reply answered it: length, directness, whether it led with the result, and whether a decision-shaped question was put through a tool-shaped ask or left sitting in prose.
+- What the assistant chose next and on what basis: the skill, agent, rule or MCP it reached for, the ones it had available and ignored, where it assumed instead of asking, where it re-derived something the project's own docs already held, and where it called work done before proving it.
+- Every friction point - a correction, a repeated ask, a mid-task redirect, visible frustration - with the turns on both sides of it, since that is the exact spot where the stack under-delivered.
+
+Each behavior worth a finding carries into 1c, where it is traced to the artifact whose TEXT produced it. Depth is not volume: the never-read-a-transcript-whole rule holds, so locate the turns with `jq` / `grep` (filter by role, then by the phrases that mark a correction) and Read only those offsets. The output is one paragraph of narrative plus the decision-trail notes, not a replay.
 
 ### 1c. Contract conformance - the stack roster under load
 
@@ -96,7 +106,7 @@ Severity: `BLOCKER` (the stack shipped a wrong result, or a gate failed to catch
 
 ### Execution scale
 
-When dispatch is available, ask ONE question before Phase 1 via AskUserQuestion - audit the bundles in this session (INLINE), or fan each bundle's 1a-1d out to a read-only subagent (DELEGATED)? - and hold the answer for the run. A DELEGATED dispatch carries the bundle path, the anatomy table, principles 1-5, the ledger shape as its mandatory return contract, and any prior-summary claims about that session as verify-don't-re-report seeds (a hint sharpens the dig; one seeded deep-dive overturned a prior sweep's inverted verdict). Subagents return every finding with `status: PROPOSED` - only the main session classifies OPEN / FIXED-SINCE / NOT-STACK, because that needs the live tree and git history. Expect a harness concurrency cap on parallel agents: launch up to the cap, then launch replacements as completions arrive, writing each bundle's 1e file before its replacement so the run stays resumable. The main session always keeps 1e, the already-fixed check, and all of Phase 2 - they need the live stack tree and the cross-session view. No dispatch capability is INLINE without asking.
+When dispatch is available, ask ONE question before Phase 1 via AskUserQuestion - audit the bundles in this session (INLINE), or fan each bundle's 1a-1d out to a read-only subagent (DELEGATED)? - and hold the answer for the run. A DELEGATED dispatch carries the bundle path, the anatomy table, principles 1-6 (the deep read of both sides included), the ledger shape as its mandatory return contract, and any prior-summary claims about that session as verify-don't-re-report seeds (a hint sharpens the dig; one seeded deep-dive overturned a prior sweep's inverted verdict). Subagents return every finding with `status: PROPOSED` - only the main session classifies OPEN / FIXED-SINCE / NOT-STACK, because that needs the live tree and git history. Expect a harness concurrency cap on parallel agents: launch up to the cap, then launch replacements as completions arrive, writing each bundle's 1e file before its replacement so the run stays resumable. The main session always keeps 1e, the already-fixed check, and all of Phase 2 - they need the live stack tree and the cross-session view. No dispatch capability is INLINE without asking.
 
 ---
 

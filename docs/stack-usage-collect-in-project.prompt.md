@@ -2,7 +2,7 @@
 
 Audit one project's claude-stack usage from that project's own directory and move the results into
 the claude-stack repo's local collection point. Collection only - the cross-project sweep
-(`docs/stack-usage-sweep-and-audit.prompt.md`) is what also runs the audit.
+(`docs/stack-usage-collect-in-project-and-sessions-audit.prompt.md`) is what also runs the audit.
 
 Run in a FRESH session started in the audited project's own directory. The audit reads that
 project's session transcripts, and it must not run from the tail of a session it is auditing.
@@ -51,8 +51,11 @@ A destination that is not ignored is a stop condition: fix the gitignore first, 
 
 ## 3. Report back
 
-State: sessions audited, files and size copied, the gitignore check result, and that the
-per-session `report-usage.md` FILL IN sections are still unauthored (that is a separate run).
+State: sessions audited, files and size copied, and the gitignore check result. The per-session
+`report-usage.md` arrives AUTHORED here - the analyzer skill fills its judgment sections while the
+machine-written tables stay untouched - which is the difference from the cross-project sweep, whose
+bundles carry the skeleton only. What is still outstanding after this run is the AUDIT of the
+collection (`docs/stack-usage-sessions-audit.prompt.md`), a separate fresh session.
 
 ## Notes
 
