@@ -221,11 +221,11 @@ three were ignored. So: after the report, if any listed step is something the us
 or run now - re-index serena, run a manual-only capture skill, restart for an MCP change, rotate
 a credential - put those steps through AskUserQuestion as the turn's last act, one option per
 step plus 'nothing now'. Steps that are purely informational stay in the report and end nothing.
-Recommendation FIRST, in the question text itself: name the step and the one reason it
-matters ('Re-run `/project-agent-capabilities`? The update refreshed 12 skill files, so the
-generated rule's stamped sentences are stale'), never a contentless 'What now?' over a list.
-The report already did the deciding; the ask only collects consent, so the recommended option
-comes first and says it is recommended.
+Recommendation FIRST, in the question text itself - the step and the one reason it matters
+('Re-run `/project-agent-capabilities`? The update refreshed 12 skill files, so
+the generated rule's stamped sentences are stale'), never a contentless 'What now?' over a list. The report
+already did the deciding; the ask only collects consent, so the recommended option comes first
+and says it is recommended. The house form of this rule is the interaction baseline's.
 
 ## 8. Clean up the temp dir - ALWAYS
 Remove `$TMP` per `${CLAUDE_PLUGIN_ROOT}/references/source-protocol.md`, on EVERY exit path:
