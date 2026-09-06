@@ -75,8 +75,11 @@ after the LAST commit when one receipt covers a reviewed batch (measured: a batc
 uncleared after 4 commits) - a leftover receipt is the stale-stamp failure the hook's 2h age
 cap exists for. A commit in a second tree this session may write (the cross-project guard's own
 allowance, for a tree the project owns) gets its own receipt in THAT tree's docs root, written and
-cleared the same way; a sibling repo is never committed from here - its change is a task card
-under `<docs-path>/cross-project-tasks/`.
+cleared the same way; a sibling repo is never committed, branched, pushed or PR'd from
+here - its change is a task card under `<docs-path>/cross-project-tasks/`, and it is never OFFERED
+as an option in an ask either. Measured: an ask presented a sibling-repo commit + push + PR as its
+`(Recommended)` option, the user took it, and `guard-cross-project-write.js` denied it at the first
+git verb - the run recommended a route the stack bans.
 
 **Publishing has the same ceremony.** `git push` and `gh pr merge` are where the work leaves this
 machine - other people and CI get it, and a shared branch cannot be un-pushed quietly - so they

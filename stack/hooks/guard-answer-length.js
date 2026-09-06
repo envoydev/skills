@@ -76,6 +76,17 @@ const DEPTH_RE = /\b(in detail|detailed|more detail|deep ?dive|in ?depth|elabora
 // (stems only: 'детальн' covers детально / детальніше / детальный).
 const DEPTH_RE_CYR = /(детальн|докладн|подробн|розгорнут|развернут|покроков|пошагов|крок за кроком|шаг за шагом|розпиши|распиши|розбір|разбор|напиши план|повністю|полностью|поясни глибше|глибше|глубже)/i;
 
+// A first-person retraction of something this run already said. 'Sorry' alone is not one, and
+// neither is a correction the run is making to somebody else's work - the exemption is for the
+// disclosure the short answer would erase.
+const SELF_CORRECTION_RE = /\b(i (was|got) (wrong|mistaken|it wrong)|my (earlier|previous|last) (claim|statement|answer|read|number|assertion|verdict)|correcting (myself|my)|i need to correct|to correct (myself|what i)|retract(ing)? (that|my)|(that|this) was (wrong|incorrect) (of me|on my part)|earlier i (said|claimed|reported|told you))\b/i;
+// The report shapes this stack's own skills MANDATE. A field required by the output contract is
+// not the run's prose - cutting it makes the report non-conforming.
+// A MARKDOWN HEADING is required, not just the word: 'Recommendation first, then why' is the
+// house answer shape, so matching a bolded lead-in would have exempted almost every answer and
+// left the cap unenforced.
+const MANDATED_FIELD_RE = /^\s{0,3}#{2,6}\s+\S{0,40}?\b(verdict|findings?|protocol check|waste analysis|blockers?|material|minor|evidence|punch[- ]list|assumptions?|not[- ]stack|fill in)\b/im;
+
 // --- transcript tail (last ~512KB): the final assistant message and the user's last real turn ---
 function tailLines() {
   const p = payload.transcript_path;
@@ -194,6 +205,17 @@ if (payload.hook_event_name === 'Stop') {
   const body = proseOf(text);
   if (body.length <= HARD_CAP) process.exit(0);
   if (user && (DEPTH_RE.test(user) || DEPTH_RE_CYR.test(user))) process.exit(0); // depth asked this turn
+  // Two exemptions, both bought with measured damage: one forced re-answer went 3,184 -> 1,085
+  // chars and took TWO of five headline findings and a self-correction disclosure with it. A cap
+  // that deletes content the user needed is worse than the wall of text it replaced.
+  //   - A SELF-CORRECTION cannot be re-answered shorter without being dropped: the shorter answer
+  //     is, by construction, the one that does not mention the mistake.
+  //   - A MANDATED REPORT FIELD belongs to the skill's own output contract, not to the run's
+  //     talking. Trimming it makes the report non-conforming, which is a second failure.
+  // Both are deliberately narrow, and neither is reachable by a run that simply wants to write
+  // more: a bare 'sorry' does not match, and neither does a heading the stack does not mandate.
+  if (SELF_CORRECTION_RE.test(text)) process.exit(0);
+  if (MANDATED_FIELD_RE.test(text)) process.exit(0);
 
   process.stderr.write(
     `This answer is ${body.length} characters of prose - the house budget is ~${BUDGET} (about 3\n` +

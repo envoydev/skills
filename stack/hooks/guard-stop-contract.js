@@ -16,8 +16,12 @@
 //   or resume fresh. It fires only after the work is done (never mid-response, which is what the
 //   old PreToolUse denial did), and re-arms only when the context has grown 1.5x since the last
 //   one - so a long session is asked once per real cost step, not once per question.
-// PreToolUse (AskUserQuestion): no longer wired on a new install. The branch stays as a
-//   fail-safe for installs that still carry the matcher (a migration unwires it); it exits 0.
+// PreToolUse (AskUserQuestion) wiring: INJECTION ONLY - `hookSpecificOutput.additionalContext`,
+//   presence-only, never ranks an option and never denies. It carries the four checks that have no
+//   other route (stale ask scope, a recommendation contradicting an un-actioned request, the
+//   fresh-session offer for a flow whose every stop is a tool call, and a live credential) plus the
+//   house-voice check on the ask's own text. The DENIAL this matcher used to carry is gone for
+//   good: it fired mid-response and cost the user a red block every turn.
 // exit 2 = block (stderr fed back); exit 0 = allow. Fail-open on anything unparseable.
 const fs = require('fs');
 // The docs root env value. CLAUDE_STACK_DOCS_PATH is the name; CLAUDE_DOCS_PATH is the pre-0.2.43
@@ -480,15 +484,167 @@ function maxCtxSeen(fallback) {
   }
 }
 
-// --- PreToolUse on AskUserQuestion: observe only ---------------------------
-// This used to DENY an ask that carried no fresh-session option. It enforced the right thing at
-// the wrong moment: the denial landed in the middle of a response, so Claude stopped the work it
-// was doing to rebuild a question, and the user watched a red block open every turn. The offer is
-// not urgent - it is about what to do NEXT - so it moved to the Stop wiring below, which fires
-// only once the turn's work is finished. New installs no longer wire this matcher at all -
-// meta/migrations.json unwires it from existing ones - and until that lands the branch is a
-// cheap no-op rather than a mid-response denial.
+// --- PreToolUse on AskUserQuestion: INJECT, never deny ---------------------
+// This branch used to DENY an ask that carried no fresh-session option. That enforced the right
+// thing at the wrong moment: the denial landed mid-response, so the run stopped the work it was
+// doing to rebuild a question and the user watched a red block open every turn. The answer is not
+// to abandon the surface - it is to stop deciding on it. This branch now emits
+// `hookSpecificOutput.additionalContext` and NOTHING else: presence only, never ranks an option,
+// never denies. Five separate measured failures land on exactly this surface, and four of them
+// have no other route:
+//   1. STALE SCOPE - an ask built on a fifty-minute-old `git status`; the sibling was committed and
+//      pushed by another agent while the ask was on screen, and the user's answer was discarded
+//      whole (third measured instance; baseline-git.md has mandated the fresh read twice, as prose).
+//   2. CONTRADICTED REQUEST - two prompts arrived in one turn, the run answered the second and put
+//      an ask whose Recommended option asserted the opposite of the first; the user took the
+//      recommendation, then re-typed their first prompt verbatim 2m54s later.
+//   3. FRESH SESSION - the Stop wiring cannot see a flow whose every stop is a tool call, which is
+//      every CONFORMING solve-task run. This is the only route that reaches those mid-turn.
+//   4. CREDENTIAL - the rotation choice belongs in the ask the turn is already making.
+//   5. HOUSE VOICE - the em-dash / single-quote rule is measured 0 for 10, and an ask's own text is
+//      a surface no Stop hook reads at all.
 if (payload.tool_name === 'AskUserQuestion') {
+  const notes = [];
+  try {
+    // Build the ask's text from its FIELDS. JSON.stringify would introduce double quotes of its
+    // own and make the house-voice check fire on every ask ever made.
+    const parts = [];
+    for (const q of ((payload.tool_input || {}).questions) || []) {
+      if (!q) continue;
+      parts.push(String(q.question || ''), String(q.header || ''));
+      for (const o of q.options || []) {
+        if (!o) continue;
+        parts.push(String(o.label || ''), String(o.description || ''));
+      }
+    }
+    const askText = parts.join('\n');
+
+    const voice = [];
+    if (/[\u2014\u2013]/.test(askText)) voice.push('an em- or en-dash (use a single dash)');
+    if (/"/.test(askText)) voice.push('a double quote (use single quotes)');
+    if (voice.length) {
+      notes.push(`This ask's own text carries ${voice.join(' and ')}. baseline-interaction.md's ` +
+        `house voice covers an AskUserQuestion's question, header, labels and descriptions - a ` +
+        `surface no Stop hook reads. Fix the text before sending it.`);
+    }
+
+    // 1. STALE SCOPE: an option that names repository, remote or job state is a MEASUREMENT, and a
+    // measurement taken before this turn is not evidence about now.
+    if (/\b(commit|push|branch|pull request|\bPRs?\b|merge|rebase|stash|staged|unstaged|uncommitted|untracked|remote|upstream|deploy(ed|ment)?|pipeline|\bCI\b|workflow run|job)\b/i.test(askText)
+        && !freshStateReadThisTurn()) {
+      notes.push('An option here names repository, remote or job state and no `git status` / ' +
+        '`git diff` / `gh` call ran in this turn. Derive that scope FRESH before asking - a ' +
+        'fifty-minute-old read had already been overtaken by another agent while the ask was on ' +
+        'screen, and the answer it produced was discarded whole.');
+    }
+
+    // 2. CONTRADICTED REQUEST: the presence signal is two typed turns arriving before one reply.
+    if (typedTurnsBeforeThisReply() >= 2) {
+      notes.push('The user sent more than one message before this reply. Check every option, and ' +
+        'the Recommended one first, against BOTH - an ask whose recommendation contradicted an ' +
+        'un-actioned earlier request was taken by the user, who then re-typed that request verbatim.');
+    }
+
+    // 3. FRESH SESSION. No recordBlockCtx here: this is a note, not the ask itself, so it must not
+    // consume the cost step the Stop wiring's real offer is owed.
+    if (FRESH_PCT !== 0 && !FRESH_RE.test(askText)) {
+      const u = (() => { const l = lastAssistantMessage(); return (l && l.message && l.message.usage) || null; })();
+      const ctx = u ? (u.cache_read_input_tokens || 0) + (u.cache_creation_input_tokens || 0) + (u.input_tokens || 0) : 0;
+      const since = lastBlockCtx();
+      if (ctx > ctxThreshold(() => maxCtxSeen(ctx)) && !(since && ctx < since * REOFFER_GROWTH)) {
+        notes.push(`This session carries ~${Math.round(ctx / 1000)}k tokens per message and every ` +
+          `further turn re-sends all of it. If this ask is about what to do NEXT, add an option to ` +
+          `resume in a fresh session, carrying both absolute numbers (this carry, and the ~80-105k ` +
+          `cold floor) - never a ratio.`);
+      }
+    }
+
+    // 4. CREDENTIAL.
+    if (secretInToolResults()) {
+      notes.push('A credential-shaped value has already entered this session\'s tool results. It ' +
+        'cannot be unsent. If this ask closes the turn, one of its questions must be whether to ' +
+        'rotate it now - name the key and its shape only, never the value.');
+    }
+  } catch { /* fail-open: an injection is never worth breaking an ask over */ }
+
+  if (notes.length) {
+    process.stdout.write(JSON.stringify({
+      hookSpecificOutput: { hookEventName: 'PreToolUse', additionalContext: notes.join('\n\n') },
+    }));
+  }
   process.exit(0);
+}
+
+// Did a repository/remote state read run since the last typed user turn? The ask's scope has to be
+// derived at ask time, and the cheap proof of that is a state-reading call in the same turn.
+function freshStateReadThisTurn() {
+  try {
+    const p = payload.transcript_path;
+    if (!p) return false;
+    const size = fs.statSync(p).size;
+    const start = Math.max(0, size - 256 * 1024);
+    const fd = fs.openSync(p, 'r');
+    const buf = Buffer.alloc(size - start);
+    fs.readSync(fd, buf, 0, buf.length, start);
+    fs.closeSync(fd);
+    const lines = buf.toString('utf8').split('\n');
+    // walk BACKWARDS to the turn boundary - the last typed (non-tool_result) user row
+    for (let i = lines.length - 1; i >= 0; i--) {
+      const line = lines[i];
+      if (!line.trim()) continue;
+      let o;
+      try { o = JSON.parse(line); } catch { continue; }
+      if (!o || !o.message) continue;
+      if (o.type === 'user' && isTypedTurn(o)) return false;
+      if (o.type === 'assistant' && Array.isArray(o.message.content)) {
+        for (const b of o.message.content) {
+          if (!b || b.type !== 'tool_use' || b.name !== 'Bash') continue;
+          const cmd = String((b.input && b.input.command) || '');
+          if (/\bgit\s+(status|diff|log|show|rev-parse|rev-list|ls-files|fetch)\b|\bgh\s+(pr|run|api|repo)\b/.test(cmd)) return true;
+        }
+      }
+    }
+    return false;
+  } catch {
+    return false;
+  }
+}
+
+// A user row is a TYPED turn only when it carries text and no tool_result - a tool result arrives
+// as a user message, and counting those made every turn look like a multi-prompt turn.
+function isTypedTurn(o) {
+  const c = o.message.content;
+  if (typeof c === 'string') return !o.isMeta && c.trim().length > 0;
+  if (!Array.isArray(c)) return false;
+  if (c.some((b) => b && b.type === 'tool_result')) return false;
+  return !o.isMeta && c.some((b) => b && b.type === 'text' && String(b.text || '').trim());
+}
+
+// How many typed turns the user sent before the reply now in progress. Two or more is the shape
+// that produced the contradicted-recommendation failure.
+function typedTurnsBeforeThisReply() {
+  try {
+    const p = payload.transcript_path;
+    if (!p) return 0;
+    const size = fs.statSync(p).size;
+    const start = Math.max(0, size - 256 * 1024);
+    const fd = fs.openSync(p, 'r');
+    const buf = Buffer.alloc(size - start);
+    fs.readSync(fd, buf, 0, buf.length, start);
+    fs.closeSync(fd);
+    let run = 0;
+    let last = 0;
+    for (const line of buf.toString('utf8').split('\n')) {
+      if (!line.trim()) continue;
+      let o;
+      try { o = JSON.parse(line); } catch { continue; }
+      if (!o || !o.message) continue;
+      if (o.type === 'user' && isTypedTurn(o)) { run += 1; continue; }
+      if (o.type === 'assistant' && run > 0) { last = run; run = 0; }
+    }
+    return run > 0 ? run : last;
+  } catch {
+    return 0;
+  }
 }
 

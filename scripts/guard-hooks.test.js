@@ -440,16 +440,49 @@ test("guard-unapproved-dispatch: a stamp written before this session began is an
   assert.equal(disp(), 0, 'a stamp written during the session');
 });
 
-test('guard-stop-contract: the AskUserQuestion gate never interrupts a response', () => {
+test('guard-stop-contract: the AskUserQuestion branch injects and NEVER denies', () => {
   // It used to deny an ask carrying no fresh-session option, which stopped Claude mid-response to
-  // rebuild the question. The offer moved to the Stop wiring, so every ask now passes.
+  // rebuild the question. The matcher is wired again, injection-only: every path exits 0, and what
+  // it emits is `hookSpecificOutput.additionalContext` the model reads while building the ask.
   const logDir = fs.mkdtempSync(path.join(TMP, 'asklog-'));
   const hot = transcript('ask-hot', [assistantRow('h1', 'ok', { cache_read_input_tokens: 900000 })]);
-  const ask = (options) => runIn('guard-stop-contract.js',
-    { tool_name: 'AskUserQuestion', hook_event_name: 'PreToolUse', transcript_path: hot, tool_input: { questions: [{ question: 'Which next?', options }] } },
-    { env: { ...process.env, CLAUDE_STACK_HOOK_LOG_DIR: logDir } }).status;
-  assert.equal(ask([{ label: 'Continue', description: 'x' }, { label: 'Stop', description: 'y' }]), 0, 'no fresh option, deep into a 1M session - still passes');
-  assert.equal(ask([{ label: 'Fresh session', description: 'resume' }]), 0, 'and so does one that has it');
+  const cold = transcript('ask-cold', [
+    { type: 'user', message: { content: 'clean up the branch' } },
+    { type: 'assistant', message: { id: 'c1', content: [{ type: 'tool_use', id: 't1', name: 'Bash', input: { command: 'git status --porcelain' } }], usage: { cache_read_input_tokens: 900 } } },
+    { type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 't1', content: 'M f' }] } },
+  ]);
+  const ask = (tp, questions) => runIn('guard-stop-contract.js',
+    { tool_name: 'AskUserQuestion', hook_event_name: 'PreToolUse', transcript_path: tp, tool_input: { questions } },
+    { env: { ...process.env, CLAUDE_STACK_HOOK_LOG_DIR: logDir } });
+  const ctxOf = (r) => { try { return JSON.parse(r.stdout).hookSpecificOutput.additionalContext; } catch { return ''; } };
+
+  const deep = ask(hot, [{ question: 'Which next?', options: [{ label: 'Continue', description: 'x' }, { label: 'Stop', description: 'y' }] }]);
+  assert.equal(deep.status, 0, 'no fresh option, deep into a 1M session - it injects, it does not deny');
+  assert.match(ctxOf(deep), /resume in a fresh session/i, 'the fresh-session offer reaches a flow whose every stop is a tool call');
+  assert.equal(ask(hot, [{ question: 'Continue or resume in a fresh session?', options: [{ label: 'Fresh session', description: 'resume' }] }]).status, 0);
+  assert.doesNotMatch(ctxOf(ask(hot, [{ question: 'Next?', options: [{ label: 'Resume in a fresh session', description: 'start clean' }] }])), /add an option to/i,
+    'an ask that already offers it is not told to offer it');
+
+  // stale scope: an option naming repo state, with no state read in this turn
+  const stale = ask(transcript('ask-stale', [assistantRow('s1', 'ok', { cache_read_input_tokens: 900 })]),
+    [{ question: 'Publish?', options: [{ label: 'Push to origin', description: 'land the commit' }] }]);
+  assert.match(ctxOf(stale), /no `git status`/, 'an ask built on an unrefreshed scope is flagged');
+  assert.doesNotMatch(ctxOf(ask(cold, [{ question: 'Publish?', options: [{ label: 'Push to origin', description: 'land it' }] }])), /no `git status`/,
+    'a state read in the same turn clears it');
+
+  // house voice, on a surface no Stop hook reads
+  const voice = ask(cold, [{ question: 'Target - staging or prod?', header: 'Target', options: [{ label: 'staging', description: 'the shared box' }] }]);
+  assert.equal(ctxOf(voice), '', "a plain hyphen and an apostrophe are clean - and a clean ask emits nothing at all");
+  assert.match(ctxOf(ask(cold, [{ question: 'Pick one \u2014 now', options: [{ label: 'the "fast" one', description: 'x' }] }])),
+    /em- or en-dash.*double quote/s, 'an em-dash and a double quote in the ask text are both named');
+
+  // two typed turns before one reply - the contradicted-recommendation shape
+  const two = ask(transcript('ask-two', [
+    { type: 'user', message: { content: 'stop touching staging' } },
+    { type: 'user', message: { content: 'and add the health endpoint' } },
+    assistantRow('t1', 'ok', { cache_read_input_tokens: 900 }),
+  ]), [{ question: 'Which one?', options: [{ label: 'Deploy staging', description: 'x' }] }]);
+  assert.match(ctxOf(two), /more than one message before this reply/);
 });
 
 test('guard-stop-contract: prose offers, tool-call ends, continuations and unreadable turns', () => {
@@ -949,4 +982,26 @@ test('stop contract: the fresh-session offer reads the window the same three way
     assert.equal(stop(hot, winEnv({ CLAUDE_CONFIG_DIR: accountDir('stop-acct-1m', 'opus[1m]') })), 0, 'a 1M model id lifts it past 190k');
     assert.equal(stop(hot, winEnv({ CLAUDE_STACK_CONTEXT_WINDOW: '1000000' })), 0, 'so does the declared window');
     assert.equal(stop(at('stopwin-450k', 450000), winEnv({ CLAUDE_STACK_CONTEXT_WINDOW: '1000000' })), 2, 'and 450k is past 40% of it');
+});
+
+test('guard-answer-length: the cap holds, and never deletes a report field or a self-correction', () => {
+  // Measured damage: a forced re-answer went 3,184 -> 1,085 chars and took TWO of five headline
+  // findings and a self-correction disclosure with it. Both exemptions are narrow on purpose -
+  // 'Recommendation first' is the house answer shape, so a bolded lead-in must NOT lift the cap.
+  const filler = 'This is filler prose that says very little but goes on and on about the process. '.repeat(40);
+  const answer = (userText, text) => run('guard-answer-length.js', {
+    hook_event_name: 'Stop',
+    session_id: 's',
+    cwd: TMP,
+    transcript_path: transcript(`al-${Math.random().toString(36).slice(2)}`, [
+      { type: 'user', message: { content: userText } },
+      assistantRow('a1', text),
+    ]),
+  });
+  assert.equal(answer('which one?', `**Recommendation:** use option B. ${filler}`), 2, 'a bolded lead-in is not a mandated field');
+  assert.equal(answer('which one?', `Sorry about that. ${filler}`), 2, "'sorry' is not a self-correction");
+  assert.equal(answer('which one?', 'Use option B.'), 0, 'an answer at budget passes');
+  assert.equal(answer('which one?', `## Findings\n\n${filler}`), 0, "a skill's own report field is exempt");
+  assert.equal(answer('which one?', `I was wrong about the threshold earlier. ${filler}`), 0, 'a self-correction is exempt');
+  assert.equal(answer('walk me through it', filler), 0, "the user's own depth request still lifts the cap");
 });

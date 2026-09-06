@@ -599,23 +599,26 @@ test('sh wiring: every hook carries a timeout, and a bare legacy entry is backfi
     }
 });
 
-test('sh wiring: OUR hook on a retired PreToolUse matcher is pruned, a foreign entry and the Stop wiring are kept', { skip: skipNoPython }, () =>
+test('sh wiring: OUR hook on a matcher this version does not wire is pruned; a still-wired matcher, a foreign entry and the Stop wiring are kept', { skip: skipNoPython }, () =>
 {
-    // guard-stop-contract used to be wired on PreToolUse AskUserQuestion as well as Stop. The plugin
-    // route unwires it through meta/migrations.json; the script route left the entry in place on every
-    // update and backfilled its timeout as if it were current (measured in the 2026-09-04 hooks audit).
+    // The script route used to leave a matcher the release had dropped in place on every update and
+    // backfill its timeout as if it were current (measured in the 2026-09-04 hooks audit). The prune
+    // is keyed on the SELECTED specs, so the same pass must leave a matcher that IS wired alone -
+    // guard-stop-contract's AskUserQuestion entry came back in 0.2.55 as an injection-only branch,
+    // and a prune keyed on the old list would unwire it in the run that just wired it.
     const src = fs.readFileSync(SH, 'utf8');
     const prog = /prog=\$\(cat <<'PY'\n([\s\S]*?)\nPY\n/.exec(src);
     const hooks = shArray(src, 'HOOKS');
     const deny = shArray(src, 'SECRET_DENY');
-    assert.ok(!hooks.some((h) => h.includes('::AskUserQuestion')), 'the retired matcher is no longer in HOOKS');
+    assert.ok(hooks.some((h) => h.startsWith('guard-stop-contract.js::AskUserQuestion::')), 'the injection matcher is wired');
     const work = fs.mkdtempSync(path.join(os.tmpdir(), 'skinst-prune-'));
     try
     {
         const settings = path.join(work, 'settings.json');
         fs.writeFileSync(settings, JSON.stringify({
             hooks: { PreToolUse: [
-                { matcher: 'AskUserQuestion', hooks: [{ type: 'command', command: '"$CLAUDE_PROJECT_DIR/.claude/hooks/guard-stop-contract.js"', timeout: 10 }] },
+                { matcher: 'AskUserQuestion', hooks: [{ type: 'command', command: '"$CLAUDE_PROJECT_DIR/.claude/hooks/guard-stop-contract.js"' }] },
+                { matcher: 'WebFetch', hooks: [{ type: 'command', command: '"$CLAUDE_PROJECT_DIR/.claude/hooks/guard-stop-contract.js"', timeout: 10 }] },
                 { matcher: 'Bash', hooks: [{ type: 'command', command: '"$CLAUDE_PROJECT_DIR/.claude/hooks/my-own-hook.js"' }] },
             ] },
         }));
@@ -623,7 +626,8 @@ test('sh wiring: OUR hook on a retired PreToolUse matcher is pruned, a foreign e
         assert.strictEqual(res.status, 0, res.stderr);
         const wired = JSON.parse(fs.readFileSync(settings, 'utf8'));
         const under = (m) => (wired.hooks.PreToolUse || []).filter((e) => e.matcher === m).flatMap((e) => e.hooks.map((h) => h.command));
-        assert.deepStrictEqual(under('AskUserQuestion'), [], 'the retired entry is gone, and its emptied matcher block with it');
+        assert.deepStrictEqual(under('WebFetch'), [], 'a matcher this version does not wire is gone, and its emptied block with it');
+        assert.ok(under('AskUserQuestion').some((c) => c.includes('guard-stop-contract.js')), 'a matcher this version DOES wire survives the prune');
         assert.ok(under('Bash').some((c) => c.includes('my-own-hook.js')), 'a hook that is not ours is never touched');
         assert.ok((wired.hooks.Stop || []).flatMap((e) => e.hooks).some((h) => h.command.includes('guard-stop-contract.js')), 'the Stop wiring of the same file is intact');
     }
