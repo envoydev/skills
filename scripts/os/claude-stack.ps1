@@ -180,23 +180,29 @@ $script:ClaudeMissing = $false   # claude CLI absent -> plugins / MCPs / setting
 $script:PrereqMissing = $false   # a hard prerequisite (uvx / python3 / node) was missing
 function Add-Failure([string]$Message) { $script:FailCount++; Write-Host "  !! $Message" -ForegroundColor Red }
 
+function Clear-WriteBlockers([string]$Path) {
+  # Windows gotcha, and the reason every raw [IO.File]::WriteAllText in this script is preceded by
+  # this call: an existing target carrying the ReadOnly or Hidden attribute makes WriteAllText (and
+  # node's fs.writeFileSync) throw 'Access to the path ... is denied' (UnauthorizedAccessException)
+  # even when the ACL would allow the write - FileMode.Create cannot truncate such a file, and
+  # recreating a Hidden one requires re-specifying the attribute. Clear those bits first so the
+  # write lands on the real content. Measured on the install stamp, which a Windows run could not
+  # rewrite once anything had marked `.claude` and its contents Hidden.
+  if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return }
+  try {
+    $f = Get-Item -LiteralPath $Path -Force
+    $blocked = [System.IO.FileAttributes]::ReadOnly -bor [System.IO.FileAttributes]::Hidden
+    if ($f.Attributes -band $blocked) { $f.Attributes = $f.Attributes -band (-bnot $blocked) }
+  } catch {}
+}
+
 function Write-JsonFile([object]$Data, [string]$Path, [int]$Depth = 20) {
   # PowerShell's ConvertTo-Json indents inconsistently and version-dependently (5.1 = 4-space
   # ladders + double-space colons; 7 = deep nested alignment). node's JSON.stringify(_, null, 2)
   # is clean 2-space everywhere, and node is always present (Claude Code requires it). So: write
   # compact via PS, then reformat the file in place with node. Fallback to PS pretty if node is gone.
   $enc = New-Object System.Text.UTF8Encoding($false)
-  # Windows gotcha: an existing target carrying the ReadOnly or Hidden attribute makes
-  # [IO.File]::WriteAllText (and node's fs.writeFileSync below) throw "Access to the path ... is
-  # denied" (UnauthorizedAccessException) even when the ACL would allow the write - FileMode.Create
-  # cannot truncate such a file. Clear those bits first so the write lands on the real content.
-  if (Test-Path -LiteralPath $Path -PathType Leaf) {
-    try {
-      $f = Get-Item -LiteralPath $Path -Force
-      $blocked = [System.IO.FileAttributes]::ReadOnly -bor [System.IO.FileAttributes]::Hidden
-      if ($f.Attributes -band $blocked) { $f.Attributes = $f.Attributes -band (-bnot $blocked) }
-    } catch {}
-  }
+  Clear-WriteBlockers $Path
   [System.IO.File]::WriteAllText($Path, ($Data | ConvertTo-Json -Depth $Depth -Compress), $enc)
   if (Get-Command node -ErrorAction SilentlyContinue) {
     try {
@@ -749,17 +755,23 @@ if ($InstalledOnly) {
   New-Item -ItemType Directory -Path $script:InstalledOnlyTmp -Force | Out-Null
   $ioClaude = if ($ClaudeScope -eq 'user') { $ConfigDir } else { Join-Path (Get-Location).Path '.claude' }
   $ioLines = @()
-  foreach ($d in @(Get-ChildItem -LiteralPath (Join-Path $ioClaude 'skills') -Directory -ErrorAction SilentlyContinue)) {
+  # -Force on every enumeration below: without it Get-ChildItem silently OMITS any item carrying
+  # the Hidden attribute, and a `.claude` tree that has picked one up (a Windows backup/sync tool,
+  # an `attrib +h`, a restore from an archive that preserved it) then derives to ZERO skills, agents,
+  # rules and hooks. The run reported '0 refreshed', wrote a stamp naming the new version, and left
+  # the old file contents on disk - a silent no-op update. The sh twin has no equivalent, since the
+  # Hidden attribute does not exist on POSIX. Measured on Windows, claude-stack v0.2.56.
+  foreach ($d in @(Get-ChildItem -LiteralPath (Join-Path $ioClaude 'skills') -Directory -Force -ErrorAction SilentlyContinue)) {
     if (Test-Path (Join-Path $d.FullName 'SKILL.md')) { $ioLines += "skill $($d.Name)" }
   }
-  foreach ($f in @(Get-ChildItem -LiteralPath (Join-Path $ioClaude 'agents') -Filter '*.md' -File -ErrorAction SilentlyContinue)) {
+  foreach ($f in @(Get-ChildItem -LiteralPath (Join-Path $ioClaude 'agents') -Filter '*.md' -File -Force -ErrorAction SilentlyContinue)) {
     $ioLines += "agent $($f.BaseName)"
   }
-  foreach ($f in @(Get-ChildItem -LiteralPath (Join-Path $ioClaude 'rules') -Filter '*.md' -File -ErrorAction SilentlyContinue)) {
+  foreach ($f in @(Get-ChildItem -LiteralPath (Join-Path $ioClaude 'rules') -Filter '*.md' -File -Force -ErrorAction SilentlyContinue)) {
     if ($f.BaseName -like 'baseline-project-*' -or $f.BaseName -eq 'project-code-style') { continue }   # generated, project-owned
     $ioLines += "rule $($f.BaseName)"
   }
-  foreach ($f in @(Get-ChildItem -LiteralPath (Join-Path $ioClaude 'hooks') -Filter '*.js' -File -ErrorAction SilentlyContinue)) {
+  foreach ($f in @(Get-ChildItem -LiteralPath (Join-Path $ioClaude 'hooks') -Filter '*.js' -File -Force -ErrorAction SilentlyContinue)) {
     if ($f.BaseName -eq 'inject-code-style') { continue }                                               # legacy generated
     $ioLines += "hook $($f.BaseName)"
   }
@@ -802,7 +814,12 @@ if ($InstalledOnly) {
   if (-not ($ioLines | Where-Object { $_.StartsWith('plugin ') })) {
     foreach ($p in $Plugins) { $ioLines += "plugin $(($p -split '@')[0])" }
   }
-  if (-not $ioLines) {
+  # The nothing-installed guard tests the FILE layers only. `-not $ioLines` could never be true here:
+  # the plugin fallback directly above appends a line for every manifest plugin, so a derivation that
+  # found zero skills, agents, rules and hooks still carried lines and the run continued to a
+  # stamped no-op update. Plugins are machine-level and mcps come from `.mcp.json`; neither is
+  # evidence that THIS target has an install.
+  if (-not ($ioLines | Where-Object { $_ -match '^(skill|agent|rule|hook) ' })) {
     Write-Host "error: -InstalledOnly found nothing installed under $ioClaude - run install (or the /claude-stack:setup command) first" -ForegroundColor Red
     Remove-Item -LiteralPath $script:InstalledOnlyTmp -Recurse -Force -ErrorAction SilentlyContinue
     exit 1
@@ -1160,7 +1177,9 @@ function Set-DocsRootStamp {
   }
   try {
     # BOM-less on PS 5.1 too: Set-Content -Encoding utf8 would prefix a BOM before the rule's frontmatter.
-    [System.IO.File]::WriteAllText($rule, (Get-Content -LiteralPath $rule -Raw).Replace('__DOCS_ROOT__', $val), (New-Object System.Text.UTF8Encoding($false)))
+    $ruleBody = (Get-Content -LiteralPath $rule -Raw).Replace('__DOCS_ROOT__', $val)
+    Clear-WriteBlockers $rule
+    [System.IO.File]::WriteAllText($rule, $ruleBody, (New-Object System.Text.UTF8Encoding($false)))
   } catch { Log '  !! docs-root stamp failed - the rule keeps the env-wins fallback' }
 }
 
@@ -1360,6 +1379,7 @@ function Write-Stamp {
   # `$` (the common shape) matches nothing, because JS counts `\r` as a line terminator. The stamp
   # is the install's only record of the revision it came from; it must parse identically on every
   # platform. (Set-Content -Encoding utf8 also prefixes a BOM on PS 5.1.)
+  Clear-WriteBlockers $dest
   [System.IO.File]::WriteAllText($dest, (($lines -join "`n") + "`n"), (New-Object System.Text.UTF8Encoding($false)))
   $shortSha = $script:StackSha.Substring(0, [Math]::Min(12, $script:StackSha.Length))
   Log "  stamp: $dest @ $shortSha"
@@ -1515,11 +1535,13 @@ function Set-HookSettings {
   # Environment keys whose SEEDED DEFAULT turned out to be WRONG: clear the key when its value is
   # still exactly that seed - a value the user set by hand is theirs and is never touched. Same
   # list in both installer twins and in meta/migrations.json (the plugin route applies it there).
-  foreach ($reset in @(@{ key = 'CLAUDE_STACK_CONTEXT_WINDOW'; seed = '1000000' })) {
+  foreach ($reset in @(
+      @{ key = 'CLAUDE_STACK_CONTEXT_WINDOW'; seed = '1000000'; to = 'AUTO' },
+      @{ key = 'CLAUDE_STACK_CONTEXT_WINDOW'; seed = '';        to = 'AUTO' })) {
     if ($data.env.PSObject.Properties[$reset.key] -and [string]$data.env.($reset.key) -eq $reset.seed) {
-      $data.env.($reset.key) = ''
+      $data.env.($reset.key) = $reset.to
       $changed = $true
-      Log "  settings.json env: $($reset.key) cleared to auto-detect (the old seed declared a 1M window on every install)"
+      Log "  settings.json env: $($reset.key) reset to $($reset.to) (auto-detect)"
     }
   }
   # env: project-default auto-compact trigger (compact at ~40% of the context window). Set only when
@@ -1556,15 +1578,18 @@ function Set-HookSettings {
     $data.env | Add-Member -NotePropertyName CLAUDE_STACK_FRESH_SESSION_PCT -NotePropertyValue '40'
     $changed = $true
   }
-  # The context window that percentage applies to - seeded EMPTY, which MEANS auto-detect. It was
-  # seeded '1000000', and that killed the gate on every install that was not a 1M account: this
-  # value is the FIRST layer of the hooks' window resolution, so a stated 1M window on a 200k
-  # session put the trigger above anything that session can ever carry, and no offer could fire
-  # (ten confirmations across four projects). Empty, the hooks read the settings model id's own
-  # window suffix (`opus[1m]`), else the tier the session has already proven. Fill it in only to
-  # OVERRULE that - '1000000' or '200000'; the box is written empty so it stays visible here.
+  # The context window that percentage applies to - seeded 'AUTO', which MEANS auto-detect. The
+  # sentinel is a WORD, not an empty string: the box is written so the knob stays visible in the env
+  # block, and an empty value there reads as a variable nobody filled in rather than as a decision.
+  # Anything that is not a window size falls through to detection identically, so an install still
+  # carrying the old '' is reset to AUTO by the pass above. It was seeded '1000000', and that killed
+  # the gate on every install that was not a 1M account: this value is the FIRST layer of the hooks'
+  # window resolution, so a stated 1M window on a 200k session put the trigger above anything that
+  # session can ever carry, and no offer could fire (ten confirmations across four projects). On
+  # AUTO the hooks read the settings model id's own window suffix (`opus[1m]`), else the tier the
+  # session has already proven. Put a NUMBER here only to OVERRULE that - '1000000' or '200000'.
   if (-not $data.env.PSObject.Properties['CLAUDE_STACK_CONTEXT_WINDOW']) {
-    $data.env | Add-Member -NotePropertyName CLAUDE_STACK_CONTEXT_WINDOW -NotePropertyValue ''
+    $data.env | Add-Member -NotePropertyName CLAUDE_STACK_CONTEXT_WINDOW -NotePropertyValue 'AUTO'
     $changed = $true
   }
   if ($changed) {
@@ -1740,6 +1765,7 @@ function Set-FrontmatterPin([string]$Path, [string]$Key, [string]$Value) {
     if ($lines[$i] -match '^---\s*$') { break }
     if ($lines[$i] -match ('^' + [regex]::Escape($Key) + ':')) {
       $lines[$i] = "${Key}: $Value"
+      Clear-WriteBlockers $Path
       [System.IO.File]::WriteAllText($Path, (($lines -join "`n") + "`n"))
       return
     }
@@ -1946,11 +1972,11 @@ Write-Host 'The same env block carries the fresh-session gate''s two knobs (seed
 Write-Host 'hand-edited value survives every update):'
 Write-Host '  CLAUDE_STACK_FRESH_SESSION_PCT   what share of the context window a session may carry before an'
 Write-Host '                                   orchestration run is offered a fresh one (default 40; 0 = off)'
-Write-Host '  CLAUDE_STACK_CONTEXT_WINDOW      the window that percentage applies to - seeded EMPTY, which'
+Write-Host '  CLAUDE_STACK_CONTEXT_WINDOW      the window that percentage applies to - seeded AUTO, which'
 Write-Host '                                   means auto-detect: the hooks read the settings model id''s'
 Write-Host '                                   window suffix (opus[1m]), else the tier the session has'
-Write-Host '                                   already proven. Fill it in (1000000 / 200000) only to'
-Write-Host '                                   overrule that; the value outranks every detection layer.'
+Write-Host '                                   already proven. Put a number there (1000000 / 200000) only'
+Write-Host '                                   to overrule that; it outranks every detection layer.'
 Write-Host 'On the auto-detected 200k tier the percentage is INERT below 76: the trigger keeps the measured'
 Write-Host '150k floor, and 200k x 75% is still 150k. Above that tier it is capped at 250k, because the'
 Write-Host 'harness auto-compacts at ~390k and a trigger above that ceiling can never fire.'

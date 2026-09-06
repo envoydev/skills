@@ -1,5 +1,5 @@
 {
-  "_comment": "Retirements of GENERATED per-project artifacts - the cleanup the upstream file compare can never name, because generated output was never a stack-shipped file. The update command applies these (with the same one-gate consent as its prune list) and validate flags them; detection is existence-based, never version math, so a leftover is caught no matter how old the install. `unwire_settings_hook` names the hook file whose settings.json entry goes, optionally scoped to one matcher as `<file>::<Matcher>` when the file stays wired for its other events. Paths resolve against the install root (the project's .claude/ parent, or the account dir in global mode); a path that does not exist simply does not detect. Every entry names why the artifact is redundant and what regenerates its replacement. Three of these act on the scope's settings.json `env` rather than on a file: `detect.settings_env_key` fires when that key is present, `detect.settings_env_value` ({key, equals}) fires only when it still holds that exact value, `rename_settings_env` ({from, to}) moves the user's VALUE to the new key and drops the old one, and `clear_settings_env` ({key, when_value}) empties a key whose SEEDED DEFAULT turned out to be wrong - only when the value is still that seed, so a value the user set by hand is never touched. The installers' env pass applies the same pair on every install and update (the list is mirrored in both twins), so an env migration is REPORTED by the update command, never confirmed as a prune - nothing is deleted and a hand-set value is carried over, not reset to the default. New env keys need no entry: the installers seed them absent-only in the same pass. An entry is REMOVED from this list when the artifact it retires comes back under a new contract: `stop-contract-askuserquestion-observe-only` unwired guard-stop-contract.js's AskUserQuestion matcher because that branch DENIED mid-response; the matcher is wired again from 0.2.55 as an injection-only branch, so leaving the migration in place would have had the update unwire, in the same run, what the installer had just wired.",
+  "_comment": "Retirements of GENERATED per-project artifacts - the cleanup the upstream file compare can never name, because generated output was never a stack-shipped file. The update command applies these (with the same one-gate consent as its prune list) and validate flags them; detection is existence-based, never version math, so a leftover is caught no matter how old the install. `unwire_settings_hook` names the hook file whose settings.json entry goes, optionally scoped to one matcher as `<file>::<Matcher>` when the file stays wired for its other events. Paths resolve against the install root (the project's .claude/ parent, or the account dir in global mode); a path that does not exist simply does not detect. Every entry names why the artifact is redundant and what regenerates its replacement. Three of these act on the scope's settings.json `env` rather than on a file: `detect.settings_env_key` fires when that key is present, `detect.settings_env_value` ({key, equals}) fires only when it still holds that exact value, `rename_settings_env` ({from, to}) moves the user's VALUE to the new key and drops the old one, and `clear_settings_env` ({key, when_value, to}) RESETS a key whose SEEDED DEFAULT turned out to be wrong - only when the value is still that seed, so a value the user set by hand is never touched; `to` names the value it resets to (absent means empty). The installers' env pass applies the same pair on every install and update (the list is mirrored in both twins), so an env migration is REPORTED by the update command, never confirmed as a prune - nothing is deleted and a hand-set value is carried over, not reset to the default. New env keys need no entry: the installers seed them absent-only in the same pass. An entry is REMOVED from this list when the artifact it retires comes back under a new contract: `stop-contract-askuserquestion-observe-only` unwired guard-stop-contract.js's AskUserQuestion matcher because that branch DENIED mid-response; the matcher is wired again from 0.2.55 as an injection-only branch, so leaving the migration in place would have had the update unwire, in the same run, what the installer had just wired.",
   "migrations": [
     {
       "id": "inject-code-style-hook-to-rule",
@@ -40,10 +40,29 @@
       "remove": [],
       "clear_settings_env": {
         "key": "CLAUDE_STACK_CONTEXT_WINDOW",
-        "when_value": "1000000"
+        "when_value": "1000000",
+        "to": "AUTO"
       },
-      "why": "the seed declared a 1M context window on EVERY install, and this value is the first layer of the fresh-session hooks' window resolution - so on any account that is not 1M the trigger sat above anything the session could ever carry and no fresh-session offer could fire (ten confirmations across four projects). Empty means auto-detect, which reads the settings model id's own window suffix and otherwise infers the tier the session has proven",
-      "then": "nothing - the box stays in settings.json, empty; fill it in only to overrule detection"
+      "why": "the seed declared a 1M context window on EVERY install, and this value is the first layer of the fresh-session hooks' window resolution - so on any account that is not 1M the trigger sat above anything the session could ever carry and no fresh-session offer could fire (ten confirmations across four projects). AUTO means auto-detect, which reads the settings model id's own window suffix and otherwise infers the tier the session has proven",
+      "then": "nothing - the box stays in settings.json reading AUTO; put a number there only to overrule detection"
+    },
+    {
+      "id": "context-window-auto-sentinel",
+      "since": "0.2.57",
+      "detect": {
+        "settings_env_value": {
+          "key": "CLAUDE_STACK_CONTEXT_WINDOW",
+          "equals": ""
+        }
+      },
+      "remove": [],
+      "clear_settings_env": {
+        "key": "CLAUDE_STACK_CONTEXT_WINDOW",
+        "when_value": "",
+        "to": "AUTO"
+      },
+      "why": "the replacement seed for the 1M one was an EMPTY string, which detects correctly but reads in the env block as a variable nobody got round to filling in - a value the user is invited to supply rather than the answer. AUTO says the same thing in a word. Behaviour is unchanged either way: anything that is not a window size falls through to the detection layers",
+      "then": "nothing - the box now reads AUTO; put a number there only to overrule detection"
     }
   ]
 }

@@ -108,7 +108,7 @@ values embedded in a registration - show `${VAR}` literally as written.
 | CLAUDE_AUTOCOMPACT_PCT_OVERRIDE | not set |
 | CLAUDE_STACK_INSTRUMENT | 0 (default - off) |
 | CLAUDE_STACK_FRESH_SESSION_PCT | 40 (default) - the fresh-session gate's share of the window; 0 = off |
-| CLAUDE_STACK_CONTEXT_WINDOW | empty (default - auto: the model id's `[1m]`-style suffix, else what the session has carried); a stated `1000000` / `200000` overrules that |
+| CLAUDE_STACK_CONTEXT_WINDOW | `AUTO` (default - the model id's `[1m]`-style suffix, else what the session has carried); a stated `1000000` / `200000` overrules that |
 | SENTRY_SLUG (account env) | set / not set - only when sentry is installed |
 | SENTRY_ACCESS_TOKEN (account env) | set / not set - only when sentry is installed and its registration carries a header |
 | CONTEXT7_API_KEY (account env) | set / not set - only when context7 is installed remote; not set = the keyless free tier |
