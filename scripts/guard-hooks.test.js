@@ -1114,3 +1114,28 @@ test('guard-ungated-commit: an ABSOLUTE docs root inside the repo does not fail 
   }).status;
   assert.equal(status, 0, 'a conformant receipt under an absolute in-repo docs root passes');
 });
+
+test('guard-cross-project-write: a drive-relative scratch target is not a cross-project write', () => {
+  // Windows-only false positive, found by running the suite on windows-latest for the first time.
+  // `path.win32.isAbsolute('/run*.log')` is TRUE - a leading slash is DRIVE-RELATIVE there - so the
+  // target is taken as absolute, resolves to a path whose first segment is the empty string, and
+  // shares nothing with the project root. `otherProjectName` then returns '', the glob is never
+  // looked at, and the guard denied a session deleting its own scratch logs. A false positive is
+  // the expensive direction: it teaches a bypass that defeats the gate on the write that mattered.
+  // Pinned through path.win32 because a POSIX host cannot run the real thing.
+  const w = path.win32;
+  const ROOT = 'D:\\a\\project\\project';
+  const nameOf = (raw) => {
+    const abs = w.isAbsolute(raw) ? raw : w.resolve(ROOT, raw);
+    const parts = w.resolve(abs).split(w.sep);
+    const rootParts = ROOT.split(w.sep);
+    let i = 0;
+    while (i < parts.length && i < rootParts.length && parts[i] === rootParts[i]) i++;
+    return parts[i] || w.basename(w.dirname(w.resolve(abs)));
+  };
+  assert.equal(nameOf('/run*.log'), '', 'the defect: win32 derives no project name at all from a drive-relative target');
+  const passes = (n) => !n || /[*?[]/.test(n);
+  assert.ok(passes(nameOf('/run*.log')), 'an unnameable target passes - there is no repo to hand off to');
+  assert.ok(passes(nameOf('run*.log')), 'and the POSIX-shaped glob still passes for the original reason');
+  assert.ok(!passes('other-repo'), 'a target that DOES name another project is still judged');
+});

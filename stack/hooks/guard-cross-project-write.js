@@ -322,7 +322,12 @@ function judge(rawIn, index, what) {
   // A target whose own leading segment is a GLOB names no project, and the denial then built its
   // remedy out of the fabricated name - 'finish YOUR side against the current behaviour of `*`'.
   // Nothing can be handed off to a repo that cannot be named, so this passes rather than blocks.
-  if (/[*?\[]/.test(otherProjectName(abs))) return;
+  // An EMPTY name is that same condition, reached a different way, and it only shows up on Windows:
+  // a drive-relative absolute target (`/run*.log`, which win32 treats as absolute) resolves to a
+  // path whose first segment is the empty string, so it shares nothing with the project root, the
+  // glob is never looked at, and the guard blocked a session deleting its own scratch logs.
+  const other = otherProjectName(abs);
+  if (!other || /[*?\[]/.test(other)) return;
   // name the token the session wrote unless a cd moved it - then the resolved path says where it lands
   if (!allowed(abs)) block(what, explicit ? raw : abs);
 }
