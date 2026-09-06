@@ -3243,10 +3243,10 @@
       ]
     },
     "next-step-ask-recommendation-first": {
-      "_note": "The guided commands' closing next-steps ask: a step the user must run or decide NOW ends the turn in ONE AskUserQuestion (prose next steps were ignored 3 of 3 in one session), and the question TEXT carries the recommendation - the step named plus the one reason it matters. A contentless 'What now?' over a list hands back the deciding the report was supposed to do, against the house recommendation-first rule. Four homes because each command runs standalone.",
+      "_note": "An AskUserQuestion's question TEXT carries the recommendation - the action plus the one reason it matters - never a contentless opener ('What now?') over a list of options, which hands back the deciding the report just did. Canonical in the always-on interaction baseline (every session and subagent, refreshed by `update`); the four guided commands restate it at their closing next-steps ask, where the failure was measured, each with its OWN example.",
       "owner": {
-        "file": "setup-plugin/commands/update.md",
-        "marker": "never a contentless 'What now?' over a list"
+        "file": "stack/rules/baseline-interaction.md",
+        "marker": "never a contentless opener"
       },
       "sites": [
         {
@@ -3255,6 +3255,10 @@
         },
         {
           "file": "setup-plugin/commands/configure.md",
+          "marker": "never a contentless 'What now?' over a list"
+        },
+        {
+          "file": "setup-plugin/commands/update.md",
           "marker": "never a contentless 'What now?' over a list"
         },
         {
