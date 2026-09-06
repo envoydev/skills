@@ -1,0 +1,21 @@
+# Line endings are a CORRECTNESS matter here, not a style one.
+#
+# Without this file git's `core.autocrlf` - on by default on Windows - checks every text file out
+# with CRLF, and then two things break. bash refuses a script whose lines end in `\r`, so the shell
+# installer that IS the install route under Git Bash dies on its first line. And JS treats `\r` as a
+# LINE TERMINATOR, which `.` does not match, so a pattern ending `(#.*)?$` fails on every commented
+# line - that alone made the installer parity lint report the ENTIRE MCP block missing from the .ps1
+# twin: eight false findings on a tree that was in perfect sync. Measured, both of them, by running
+# the suite against a CRLF checkout: 9 lint findings and 33 test failures that vanish under this file.
+#
+# LF everywhere, in the repo and in the working tree, on every platform. PowerShell reads LF fine, so
+# there is no CRLF exception to make - one line ending, one behaviour, nothing to reason about.
+* text=auto eol=lf
+
+# Never touch bytes that are not text.
+*.png binary
+*.jpg binary
+*.gif binary
+*.ico binary
+*.gz  binary
+*.zip binary
