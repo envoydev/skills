@@ -2,8 +2,9 @@
 
 Gather Claude Code session usage data from several consuming projects into this repo's local
 collection, then audit the collection against the stack source. One run, two halves: a
-deterministic COLLECT half driven entirely from the claude-stack clone, and an ANALYZE half that
-hands the result to `docs/stack-usage-sessions-audit.prompt.md`.
+deterministic COLLECT half driven entirely from the claude-stack clone, and a DEEP ANALYZE half
+that hands the result to `docs/stack-usage-sessions-audit.prompt.md` - the counters say what ran
+and what it cost, the conversation says why, and both are in scope.
 
 Run from the claude-stack repo root, in a FRESH session. Nothing here runs inside the audited
 projects - the sweep reads their session history where Claude Code already stores it, so no
@@ -62,7 +63,7 @@ Write `<DEST>/<project-name>/<session-id>/` containing:
 | `analyzer.json` | `node scripts/analyze-usage.js <transcript> --json > .../analyzer.json` |
 | `analyzer-full.txt` | `node scripts/analyze-usage.js <transcript> > .../analyzer-full.txt` |
 | `report-usage.md` | `node scripts/analyze-usage.js <transcript> --report-md > .../report-usage.md` - the skeleton; its FILL IN judgment sections stay unauthored, the audit does not need them |
-| `<session-id>.jsonl` | copy of the transcript - the audit's ground truth |
+| `<session-id>.jsonl` | copy of the transcript - the audit's ground truth, and the ONLY artifact carrying the actual messages (the user's turns and the assistant's replies); every analyzer output is a count over it, so a bundle without it can be measured but not read for behavior |
 | `subagents/` | copy of the transcript's sibling `subagents/` folder when it exists |
 | `tool-usage-<sid>.jsonl` | the instrumentation ledgers from the project's own docs root (`<project>/.claude/docs/tools-usage/<sid>.jsonl`, or its `CLAUDE_STACK_DOCS_PATH` root), the session's own and its dispatched agents' - COPIED, never moved: the project owns its data and this sweep is a reader |
 | `hook-blocks-<sid>.jsonl` | the guard-block ledger from the same docs root (`<project>/.claude/docs/hook-blocks/<sid>.jsonl`) - one row per BLOCK, naming which hook fired. COPIED like the ledger above. The transcript records only which TOOL was denied, never which guard denied it, so without this file the per-hook block rate - the number that says whether a gate earns its keep or misfires - is unmeasurable for the swept session |
@@ -93,3 +94,20 @@ noting that this collection nests one project level above the session-id folders
 enumeration walks `<SESSIONS_ROOT>/<project>/<session-id>/` and its cross-session synthesis spans
 projects - a defect reproducing across two projects' stacks is the strongest cluster the sweep can
 produce.
+
+Run that audit DEEP: the messages are read, not just the ledgers. Numbers show that a thing
+happened and what it cost; only the conversation shows the behavior and the decision behind it, so
+walk each session's user turns and assistant replies together as one decision trail and record:
+
+- What the user asked for, in their own words, and how the reply answered it - length, directness,
+  and whether a decision-shaped question was put through a tool-shaped ask or left in prose.
+- What the assistant chose next and on what basis: the skill, agent, rule or MCP it reached for,
+  the ones it had and ignored, where it assumed instead of asking, where it re-derived something
+  the docs already held, and where it declared work done before proving it.
+- Every friction point - a correction, a repeated ask, a mid-task redirect, visible frustration -
+  with the turns on both sides of it, since that is the exact spot where the stack under-delivered.
+
+Each behavior that earns a finding is traced to the artifact whose TEXT produced it - the fix is a
+change to that skill, agent, rule or hook, never a note about the session. Depth is not volume: the
+no-dumps rule from Phase B still holds, so locate the turns with `jq` / `grep` over the transcript
+and Read only those offsets.
