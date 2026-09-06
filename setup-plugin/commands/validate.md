@@ -11,6 +11,16 @@ discipline as the sibling commands - drive it interactively, walk one layer at a
 evidence/prerequisite before acting, never add or remove without consent. `stack-select.js` does
 the deterministic work; you orchestrate.
 
+**This run needs NO conversation context - decide WHERE to run it first.** Before anything
+downloads, put it through AskUserQuestion: run here anyway, or run in a fresh session
+(recommended). Quote THIS session's own per-message context (`input + cache_read +
+cache_creation` off the last assistant message) against the run's own budget - never a figure
+measured in some other session. Every answer names its next action: fresh session -> give the
+paste-ready one-liner and end the turn; run here -> start step 1 now; not now -> say what is
+owed and end the turn. If a redirect displaces the ask, re-offer it ONCE. Measured: this
+command's siblings entered at 131,345 and 168,516 tokens per message with no ask at all, and
+one of them authored its own prose decision that was never put to the user.
+
 **ONE release archive is the entire download** - read `${CLAUDE_PLUGIN_ROOT}/references/source-protocol.md`
 before step 1 and hold the whole run to it: download + extract once into `$TMP/repo`, use
 `stack-select.js` / the graph / `recommendations.json` / the installer from that snapshot, hand
@@ -297,7 +307,7 @@ renames included - and named in the post-check the same way an added artifact is
 profile), output to `$TMP/select.out` - then:
 
 - **Adds**: run the installer from the snapshot for the kept+added set -
-  `bash "$TMP/repo/scripts/os/claude-stack.sh" install --source "$TMP/repo" --scope <scope> --selection selection.txt [--space <name>] [--sentry-slug <slug>] [--sentry-auth token|oauth]`
+  `bash "$TMP/repo/scripts/os/claude-stack.sh" install --source "$TMP/repo" --scope <scope> --selection "$TMP/selection.txt" [--space <name>] [--sentry-slug <slug>] [--sentry-auth token|oauth]`
   (ps1 on Windows). Sentry environment plan: whenever sentry is installed or among the adds, read the
   ACCOUNT `settings.json` env (`~/.claude/settings.json`, or the space's) - `SENTRY_SLUG` missing -> ask
   it (`<org>` or `<org>/<project>`) and pass `--sentry-slug`; `SENTRY_ACCESS_TOKEN` missing in token
@@ -313,6 +323,14 @@ profile), output to `$TMP/select.out` - then:
   USER's next step, so the generated awareness rule reflects the reconciled inventory - the
   skill is manual-only (`disable-model-invocation`), a Skill call from this run is blocked;
   never attempt it. The run rewrites `claude-stack.stamp` to the snapshot revision.
+
+**A next step that needs a USER ACTION in this session ends the turn in ONE AskUserQuestion.**
+A listed next step is a directive, and three of them shipped as prose in one session and all
+three were ignored. So: after the report, if any listed step is something the user must decide
+or run now - re-index serena, run a manual-only capture skill, restart for an MCP change, rotate
+a credential - put those steps through AskUserQuestion as the turn's last act, one option per
+step plus 'nothing now'. Steps that are purely informational stay in the report and end nothing.
+
 
 ## 12. Post-check
 

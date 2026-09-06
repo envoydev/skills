@@ -159,13 +159,13 @@ prune: .claude/rules/web-conventions.md (renamed upstream; typescript-convention
 ```
 
 On 'proceed': selection = installed, minus the confirmed prune list, plus the new names of
-renames; write `raw.json`, run `stack-select.js --selection raw.json --emit selection.txt
+renames; write `raw.json`, run `stack-select.js --selection "$TMP/raw.json" --emit "$TMP/selection.txt"
 --check`. A `required:` line (a dependency the new release introduced) is auto-kept and
 reported. An `unknown:` line is an upstream retirement the compare missed - already excluded
 from the emitted selection; add it to the prune list (an MCP simply drops out of the
 regenerated `.mcp.json`; name it in the report). Blockers stop the run with their fixes -
 never update past one; warnings are listed and passed. Then run the installer as in step 3 but
-with `--selection selection.txt` / `-Selection selection.txt` in place of the installed-only
+with `--selection "$TMP/selection.txt"` / `-Selection "$TMP/selection.txt"` in place of the installed-only
 flag.
 
 ## 5. Prune
@@ -203,6 +203,13 @@ cache was built over serena's own language-server directory: `SERENA_HOME=.seren
 serena-agent serena project index`. Never invoke it from this run - the skill is manual-only (`disable-model-invocation`), so a
 Skill call is blocked (measured: an update run tried and the harness refused it); the report
 line is the mechanism.
+
+**A next step that needs a USER ACTION in this session ends the turn in ONE AskUserQuestion.**
+A listed next step is a directive, and three of them shipped as prose in one session and all
+three were ignored. So: after the report, if any listed step is something the user must decide
+or run now - re-index serena, run a manual-only capture skill, restart for an MCP change, rotate
+a credential - put those steps through AskUserQuestion as the turn's last act, one option per
+step plus 'nothing now'. Steps that are purely informational stay in the report and end nothing.
 
 ## 8. Clean up the temp dir - ALWAYS
 Remove `$TMP` per `${CLAUDE_PLUGIN_ROOT}/references/source-protocol.md`, on EVERY exit path:

@@ -7,6 +7,16 @@ disable-model-invocation: true
 
 You are bootstrapping the claude-stack FROM SCRATCH. If the stack is already installed here (a populated `.claude/skills` + `.claude/agents`, or the global account equivalents in no-project mode), stop and route to a sibling command: `/claude-stack:update` for a plain refresh, `/claude-stack:configure` to adjust the selection - updates are their job. Work the ladder in order and drive it interactively; the deterministic work is done by `stack-select.js`, you orchestrate. Two modes, detected silently before the first question: **project mode** (the normal case - cwd is a project root in a git repo; the selection is decided from the project itself) and **no-project mode** (anything else - a global install seeded from the recommended set).
 
+**This run needs NO conversation context - decide WHERE to run it first.** Before anything
+downloads, put it through AskUserQuestion: run here anyway, or run in a fresh session
+(recommended). Quote THIS session's own per-message context (`input + cache_read +
+cache_creation` off the last assistant message) against the run's own budget - never a figure
+measured in some other session. Every answer names its next action: fresh session -> give the
+paste-ready one-liner and end the turn; run here -> start step 1 now; not now -> say what is
+owed and end the turn. If a redirect displaces the ask, re-offer it ONCE. Measured: this
+command's siblings entered at 131,345 and 168,516 tokens per message with no ask at all, and
+one of them authored its own prose decision that was never put to the user.
+
 **ONE release archive is the entire download** - read `${CLAUDE_PLUGIN_ROOT}/references/source-protocol.md` before step 1 and hold the whole run to it: download + extract once into `$TMP/repo` (the reference owns the fallback), use every tool from that snapshot, hand it to the installer with `--source` in step 10, and remove `$TMP` per the 'Clean up' section on every exit path. The protocol's 'Narrate, don't trace' section governs every tool call in this run: one quiet call per recompute, no pasted tool output, one narration line between steps.
 
 **Every ask in this run goes through the AskUserQuestion tool** - concrete options, the recommended one marked, free text via Other; a prose question or a bare stop-and-wait is invalid (measured: prose asks were skipped in live runs while tool-shaped asks were answered every time). A plain-text option list is the fallback only where the harness lacks the tool.
@@ -123,7 +133,7 @@ itself as `skipped` rather than inventing it - say so once, and point at `/claud
 
 ## 9. Prerequisite check
 
-Run: `node stack-select.js --selection raw.json --emit selection.txt --check [--context7-local] [--sentry-oauth] [--github-cli] [--config-dir ~/.claude-<space>]` (`--config-dir` only under a `--space` profile, so the env probe reads THAT account's settings.json instead of `~/.claude`; `--context7-local` only when the user chose context7 `local`; `--sentry-oauth` only when they chose sentry `oauth` at step 7 - it drops the token warning that mode never needs (the slug warning stays: the URL needs it in both modes; the check reads the account settings.json env as well as the shell); `--github-cli` only when they opted in at step 1). Redirect its output to `$TMP/select.out` like every recompute. It writes `selection.txt` - the closed installer selection. **Fixed shape, three blocks:** (1) one verdict line - `blockers: N · warnings: N`; (2) the closed selection grouped by category, closure adds marked with their reasons; (3) the lists:
+Run: `node stack-select.js --selection "$TMP/raw.json" --emit "$TMP/selection.txt" --check [--context7-local] [--sentry-oauth] [--github-cli] [--config-dir ~/.claude-<space>]` (`--config-dir` only under a `--space` profile, so the env probe reads THAT account's settings.json instead of `~/.claude`; `--context7-local` only when the user chose context7 `local`; `--sentry-oauth` only when they chose sentry `oauth` at step 7 - it drops the token warning that mode never needs (the slug warning stays: the URL needs it in both modes; the check reads the account settings.json env as well as the shell); `--github-cli` only when they opted in at step 1). Redirect its output to `$TMP/select.out` like every recompute. It writes `selection.txt` - the closed installer selection. **Fixed shape, three blocks:** (1) one verdict line - `blockers: N · warnings: N`; (2) the closed selection grouped by category, closure adds marked with their reasons; (3) the lists:
 
 - Blockers: list each with its fix, then AskUserQuestion: fix them now and continue (recommended), or drop the affected items (reopen the owning layer's table, re-run, re-emit). Never install past a blocker.
 - Warnings: list them and proceed.
@@ -133,8 +143,8 @@ Run: `node stack-select.js --selection raw.json --emit selection.txt --check [--
 
 Run the installer **from the snapshot**, and pass it back with `--source` so it installs from what you already downloaded instead of fetching again:
 
-- Unix: `bash "$TMP/repo/scripts/os/claude-stack.sh" install --source "$TMP/repo" --scope <scope> --selection selection.txt [--space <name>] [--context7 local|remote] [--sentry-slug <slug>] [--sentry-auth token|oauth] [--github-cli]`
-- Windows: `pwsh -File "$TMP/repo/scripts/os/claude-stack.ps1" install -Source "$TMP/repo" -Scope <scope> -Selection selection.txt [-Space <name>] [-Context7 local|remote] [-SentrySlug <slug>] [-SentryAuth token|oauth] [-GitHubCli]` - the ps1 handles the serena/TypeScript-on-Windows patch itself.
+- Unix: `bash "$TMP/repo/scripts/os/claude-stack.sh" install --source "$TMP/repo" --scope <scope> --selection "$TMP/selection.txt" [--space <name>] [--context7 local|remote] [--sentry-slug <slug>] [--sentry-auth token|oauth] [--github-cli]`
+- Windows: `pwsh -File "$TMP/repo/scripts/os/claude-stack.ps1" install -Source "$TMP/repo" -Scope <scope> -Selection "$TMP/selection.txt" [-Space <name>] [-Context7 local|remote] [-SentrySlug <slug>] [-SentryAuth token|oauth] [-GitHubCli]` - the ps1 handles the serena/TypeScript-on-Windows patch itself.
 
 `--source` is what makes the guided run take ONE download. The installer owns nothing here: it copies out of `$TMP/repo` and leaves it for you to remove at cleanup. It writes `.claude/claude-stack.stamp` recording the commit it installed (read from the snapshot's `RELEASE-SOURCE`) - that is what a later `/claude-stack:configure` diffs against.
 
@@ -156,6 +166,13 @@ keys outside the catalog and the plugin's own settings survive.
 Not required - open with WHERE it lives and WHAT a yes changes, then AskUserQuestion (fill it in - recommended / skip); a 'no' ends the run cleanly (a later `/claude-stack:configure` can always reconcile it). The location: the installer seeded `.claude/CLAUDE.md` from the snapshot's `stack/CLAUDE.template.md` when the project had none - that file, in this project, is the target; a pre-existing CLAUDE.md (root or `.claude/`) is NEVER overwritten - the offer becomes a reconcile against the fetched template instead (add the sections it lacks, leave the project's own prose untouched), with the changes shown before writing. On a yes: follow the template's own authoring-outline comment - write the project top (what the project is, structure, the real build/test commands), cover the outline's inventories (stack, commands, secrets/config globs), and trim its rules table to the rules this selection actually installed. Never offer skill/agent/MCP additions here - the walk owned the selection. Skip in no-project mode (a global install seeds no project file).
 
 ## Post-check + next steps - close every run with this card
+
+**A next step that needs a USER ACTION in this session ends the turn in ONE AskUserQuestion.**
+A listed next step is a directive, and three of them shipped as prose in one session and all three
+were ignored. So after the card, put the steps the user must decide or run NOW - the session
+reload, the gitignore write, the account-file credential line, a manual-only capture skill -
+through AskUserQuestion as the turn's last act, one option per step plus 'nothing now'. Purely
+informational steps stay in the card and end nothing.
 
 Report what still needs a hand: LSP tools (`csharp-ls` via `dotnet tool install -g csharp-ls` on a .NET setup), the `/claude-hud:setup` statusline step, and that the first `claude plugin install` may prompt to trust. Then, AFTER the summary, print the next-steps card - built from what THIS run actually installed, never naming a command whose skill is absent. The card opens with the one step everything else depends on - reload the session (MCPs connect and skills/agents/rules inject at launch; nothing installed this run is live until then) - and closes by naming `${CLAUDE_PLUGIN_ROOT}/references/post-install.md` as the durable copy the user can re-read later (it adds the serena setup prompt and the gitignore semantics):
 

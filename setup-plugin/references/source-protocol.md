@@ -25,6 +25,20 @@ Invoke-WebRequest -Uri https://github.com/envoydev/claude-stack/releases/latest/
 Expand-Archive -LiteralPath "$TMP/claude-stack.zip" -DestinationPath "$TMP/repo"
 ```
 
+**Carry `$TMP` in a MARKER FILE, and address every run artifact through it.** Each Bash call is its
+own shell, so a `TMP=$(mktemp -d)` set in one call is gone by the next and every run invents its own
+way of remembering it. The idiom, once, in both homes:
+
+```bash
+TMP=$(mktemp -d); printf '%s\n' "$TMP" > /tmp/claude-stack-run.path   # first call
+TMP=$(cat /tmp/claude-stack-run.path)                                  # every later call
+```
+
+Every artifact this run writes or reads - `raw.json`, `selection.txt`, `select.out`, `final.json` -
+is named as `"$TMP/<file>"`, never bare. A bare relative name resolves against whatever cwd the
+shell drifted to, and the six sites that carried one were saved only by a model choosing an absolute
+path on its own initiative. PowerShell keeps `$TMP` the same way, in the same marker file.
+
 - The archive is the newest release - the repo's release workflow republishes it on every
   release merge to `main`, tagged `v<version>` from the plugin manifest, so the release version
   always equals the plugin/marketplace version; the `releases/latest/download/...` URLs above
