@@ -101,16 +101,78 @@ const serenaHint = (p) =>
 
 const input = payload.tool_input || {};
 
+// A heredoc body is DATA, not shell: a plan or checklist that merely DESCRIBES a dangerous command
+// is inert text, and matching it blocks a document write for its own prose (reproduced). Blank the
+// payload spans, keeping the character count so any index into the command still holds.
+const stripHeredocsOf = (c) => c.replace(
+  /<<-?\s*(['"]?)([A-Za-z_][A-Za-z0-9_]*)\1[\s\S]*?^\s*\2\s*$/gm,
+  (m) => m.replace(/[^\n]/g, ' '),
+);
+// One per-session state file, shared by the cumulative read cap and the convention-rule announcer.
+const sessionStateFile = () => pathMod.join(os.tmpdir(), `guard-read-${(payload.session_id || 'nosession').replace(/[^\w-]/g, '')}.json`);
+
+// The nine path-scoped convention rules attach on a FILE-TOOL touch and on nothing else. Under a
+// Bash-first working mode they therefore never attach at all: measured with a control for the first
+// time, 19 Bash calls naming `.cs` files produced 0 attachments, while the session's single
+// Read-tool call on a `.cs` file attached BOTH `.cs`-scoped rules 0.94 s later - so the C# rule was
+// absent for the whole DESIGN, PLAN and GATE phase of a C# build. Corroborated at 0 attaches over
+// 123 `.md` write targets and 54 authored docs. This hook already runs on every Bash call and
+// already parses the extension, so it is the one place that can close the gap: it names the rule
+// that governs the file, ONCE per rule per session, as non-blocking additionalContext.
+const CONVENTION_RULES = [
+  [/\.Designer\.cs\b/i, 'winforms-conventions.md'],
+  [/\.cs\b/i, 'csharp-conventions.md'],
+  [/\.xaml\b/i, 'wpf-conventions.md'],
+  [/\.(component|service|directive|pipe|guard|resolver|module|routes)\.ts\b/i, 'angular-conventions.md'],
+  [/\.(component|global)\.(scss|css)\b|\bstyles\.(scss|css)\b/i, 'angular-styling-conventions.md'],
+  [/\.tsx?\b/i, 'typescript-conventions.md'],
+  [/\.(jsx?|mjs|cjs)\b/i, 'javascript-conventions.md'],
+  [/\.sql\b/i, 'sql-conventions.md'],
+  [/\bDockerfile\b|\b(docker-)?compose[^\s]*\.ya?ml\b|\.github\/workflows\/[^\s]+\.ya?ml\b/i, 'devops-conventions.md'],
+  [/\.md\b/i, 'markdown-docs.md'],
+];
+// The announcement is HELD until the call is allowed, and only then marked as said: a denial and an
+// injection are two different answers to the same tool call, and a rule announced into a turn that
+// was blocked would be spent on a command that never ran.
+function announceRules(text) {
+  const hit = [];
+  for (const [re, rule] of CONVENTION_RULES) if (re.test(text) && !hit.includes(rule)) hit.push(rule);
+  if (!hit.length) return;
+  let state = {};
+  const f = sessionStateFile();
+  try { state = JSON.parse(fs.readFileSync(f, 'utf8')); } catch { /* fresh state */ }
+  const said = state.__rules || [];
+  const fresh = hit.filter((r) => !said.includes(r));
+  if (!fresh.length) return;
+  const flush = () => {
+    try {
+      let cur = {};
+      try { cur = JSON.parse(fs.readFileSync(f, 'utf8')); } catch { /* fresh state */ }
+      cur.__rules = (cur.__rules || []).concat(fresh);
+      fs.writeFileSync(f, JSON.stringify(cur));
+    } catch { /* best-effort */ }
+    process.stdout.write(JSON.stringify({
+      hookSpecificOutput: {
+        hookEventName: 'PreToolUse',
+        additionalContext: `This command touches files governed by ${fresh.map((r) => `\`.claude/rules/${r}\``).join(' and ')}. `
+          + `A path-scoped rule attaches on a FILE-TOOL touch only, so working through the shell never loads it - `
+          + `read the rule and load the house-style skill it names before the next edit to those files.`,
+      },
+    }));
+  };
+  const exit = process.exit.bind(process);
+  process.exit = (code) => { if (code === 0) flush(); exit(code); };
+}
+
 // ---- Bash matcher: a whole-file dump via cat/sed is the Read block routed around ----
 if (payload.tool_name === 'Bash') {
+  // Runs FIRST and on EVERY Bash call, not just the dump verbs: a grep, a build and a test run all
+  // name the files whose conventions the session needs, and none of them reaches the checks below.
+  try { announceRules(stripHeredocsOf(String((payload.tool_input || {}).command || ''))); } catch { /* an injection never breaks the gate */ }
   // A heredoc body is DATA, not shell: a plan or checklist that merely DESCRIBES a dangerous
   // command is inert text, and matching it blocks a document write for its own prose (reproduced).
   // Blank the payload spans, keeping the character count so any index into the command still holds.
-  const stripHeredocs = (c) => c.replace(
-    /<<-?\s*(['"]?)([A-Za-z_][A-Za-z0-9_]*)\1[\s\S]*?^\s*\2\s*$/gm,
-    (m) => m.replace(/[^\n]/g, ' '),
-  );
-  const command = stripHeredocs(String(input.command || ''));
+  const command = stripHeredocsOf(String(input.command || ''));
   // Only `cat`/`sed` were gated, so the same whole-file dump walked through under any other verb:
   // `head -n 100000`, `tail -n +1`, `less`, `awk '1'`, `python3 -c "print(open(f).read())"` all
   // passed (reproduced x5 against a 1371-line file).
@@ -254,7 +316,7 @@ if (wholeShape) {
 // half-splits reconstructing the file are the whole-file read in two calls (measured).
 const CAP = 0.6;
 const end = Math.min(lineCount, offset + (input.limit != null ? input.limit : lineCount) - 1);
-const stateFile = pathMod.join(os.tmpdir(), `guard-read-${(payload.session_id || 'nosession').replace(/[^\w-]/g, '')}.json`);
+const stateFile = sessionStateFile();
 let state = {};
 try { state = JSON.parse(fs.readFileSync(stateFile, 'utf8')); } catch { /* fresh state */ }
 const intervals = (state[path] || []).concat([[offset, end]]).sort((a, b) => a[0] - b[0]);

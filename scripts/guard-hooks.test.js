@@ -1072,3 +1072,23 @@ test('guard-answer-length: the cap holds, and never deletes a report field or a 
   assert.equal(answer('which one?', `I was wrong about the threshold earlier. ${filler}`), 0, 'a self-correction is exempt');
   assert.equal(answer('walk me through it', filler), 0, "the user's own depth request still lifts the cap");
 });
+
+test('guard-read-whole-file: a shell touch names the convention rule the file tools would have attached', () => {
+  // Measured with a control: 19 Bash calls naming .cs files -> 0 attachments, while the session's
+  // single Read-tool call on a .cs file attached BOTH .cs-scoped rules 0.94 s later. Under a
+  // Bash-first mode the nine path-scoped rules are simply OFF.
+  const call = (command, session_id) => runIn('guard-read-whole-file.js', { tool_name: 'Bash', tool_input: { command }, session_id }, {});
+  const ctxOf = (r) => { try { return JSON.parse(r.stdout).hookSpecificOutput.additionalContext; } catch { return ''; } };
+  const s1 = `m5-${Math.random().toString(36).slice(2)}`;
+  assert.match(ctxOf(call("grep -rn 'IOrderService' src/Api/Orders.cs", s1)), /csharp-conventions\.md/, 'a grep is a touch');
+  assert.equal(ctxOf(call('dotnet build && grep -n x src/Api/Orders.cs', s1)), '', 'once per rule per session');
+  assert.match(ctxOf(call('wc -l README.md', s1)), /markdown-docs\.md/, 'a different rule still announces');
+  assert.equal(ctxOf(call('ls -la', s1)), '', 'a command naming nothing governed is silent');
+  assert.equal(ctxOf(call(`cat <<'EOF' > plan.md\nedit src/Thing.sql later\nEOF`, s1)), '', 'a heredoc body is prose, not a touch');
+  // a denial and an injection are two answers to one call: the rule is not spent on a blocked command
+  const s2 = `m5-${Math.random().toString(36).slice(2)}`;
+  const blocked = call(`cat ${BIG.replace(/\.js$/, '.js')}`, s2);
+  assert.equal(blocked.status, 2, 'a whole-file dump of a large .js file is still blocked');
+  assert.equal(ctxOf(blocked), '', 'and announces nothing');
+  assert.match(ctxOf(call(`grep -n Foo ${BIG}`, s2)), /javascript-conventions\.md/, 'the next allowed touch still gets it');
+});
