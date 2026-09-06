@@ -37,8 +37,20 @@ cycle note 'csv-export__cycle': step 4 BUILD - resume at task 2, mode session
 
 ## The stop contract
 
-A stop IS one AskUserQuestion call: report one line of result and the artifact path, then put
-the next move through the AskUserQuestion tool - EVERY stop, the plain step-done ones included.
+A stop IS one AskUserQuestion call: report THREE named fields, then put the next move through the
+AskUserQuestion tool - EVERY stop, the plain step-done ones included.
+
+```
+Result:    <one line> - <the artifact path>
+Progress:  <N> of <M> steps
+Leftovers: <what this run started and did not finish | none>
+```
+
+Named fields, not prose about them: a controlled measurement put five named fields at 5 of 5
+emitted and the same step's prose condition at 0 of 1. `Progress: N of M` is the one piece of run
+state measured to SURVIVE a compaction where the prose equivalent did not, and `Leftovers:` exists
+because a cycle stamped `Completed` with its fix delta unreviewed sat 1h42m until the user asked
+what was left - `none` is an answer, an omitted line is not.
 There is no non-decision stop: 'what happens next' is itself the decision. The options are
 concrete - the next step (named), the route-back where the step surfaced gaps or findings, the
 fresh-session resume on a long cycle (below), any conflict's real resolutions - the
@@ -53,8 +65,10 @@ model or effort, paste context, or edit the plan file directly, then answer - an
 the cheap point to run the next step in a fresh session (`/clear`): resume needs only the plan
 file + cycle note, so the step starts at a few k of context instead of re-sending the finished
 steps' whole conversation with every call - in a long cycle that carried-forward context is the
-single biggest token cost (measured: a fresh-session resume restarted at roughly a tenth of the
-carried context with zero re-work - stamped steps stayed done). On a long cycle this is a step,
+single biggest token cost (measured: a resume restarts at 21.5-59.4% of the carried context, never
+under 21%, with zero re-work - stamped steps stay done; state those two absolute numbers to the
+user, never a ratio - the 'roughly a tenth' this rule used to claim was 2-6x optimistic and reached
+users verbatim inside the options they acted on). On a long cycle this is a step,
 not an offer to remember: once the cycle has crossed roughly 150k ctx per message, spans hours,
 or resumes after an idle gap, the fresh-session resume IS one of the next ask's options - every
 ask until it is taken or the cycle closes. And HONOR the answer: when the user picks it, the

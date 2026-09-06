@@ -28,7 +28,23 @@ Load the plan's target stack skill FIRST, so you check against the right trap li
 
 ## Output
 
-A short punch-list, not a rewrite. One line per finding: `severity | the gap | the fix to the PLAN` - and a finding that is a tradeoff or preference rather than an objective defect carries the extra tag `judgment`: the applier puts each judgment item through its own AskUserQuestion instead of folding it into a blanket 'fix all' approval (measured: an unmarked transport-channel switch rode a blanket 'go ahead', landed, and was reverted on a live user interrupt - 32% of that apply phase's edits spent applying-then-reversing it). If the plan is sound, say so plainly and name what you checked. When the plan lives in a file (`<docs-path>/superpowers/plans/` - `project-solution-design` writes it there), stamp the verdict into it - one line, `Gated: passed | <N> gaps listed - <date>` - so a compacted or fresh session knows the audit already happened. When the findings are then applied to the plan, land them in as few Edit calls as possible - one per task section, never one per line (measured: 28 single-hunk edits to one plan file in one apply pass, each at full session context). Then it is safe to build against; if not, fix the plan first - that is the whole point of doing this before code.
+**Five named fields, every run, each with a value** - a controlled measurement put named fields at
+5 of 5 emitted against a prose condition at 0 of 1, so anything that must happen every time is a
+field, not a sentence about when to write one:
+
+```
+Oriented:  verified | MISSING/unevidenced
+Decisions: <N entries, each with its precedent> | ABSENT
+Scope:     matches | <what is missing or speculative>
+Findings:  <count by severity, or `none`>
+Gated:     passed | <N> gaps listed - <date>
+```
+
+`Decisions:` is a PASS CONDITION, not a note: a plan whose `## Decisions` ledger is absent is a
+finding in its own right, because the build seats read that ledger for the precedents they must
+build to (measured: 0 occurrences of the ledger in a plan that was then stamped `Gated: passed`).
+
+Then the body: a short punch-list, not a rewrite. One line per finding: `severity | the gap | the fix to the PLAN` - and a finding that is a tradeoff or preference rather than an objective defect carries the extra tag `judgment`: the applier puts each judgment item through its own AskUserQuestion instead of folding it into a blanket 'fix all' approval (measured: an unmarked transport-channel switch rode a blanket 'go ahead', landed, and was reverted on a live user interrupt - 32% of that apply phase's edits spent applying-then-reversing it). If the plan is sound, say so plainly and name what you checked. When the plan lives in a file (`<docs-path>/superpowers/plans/` - `project-solution-design` writes it there), stamp the verdict into it - one line, `Gated: passed | <N> gaps listed - <date>` - so a compacted or fresh session knows the audit already happened. When the findings are then applied to the plan, land them in as few Edit calls as possible - one per task section, never one per line (measured: 28 single-hunk edits to one plan file in one apply pass, each at full session context). Then it is safe to build against; if not, fix the plan first - that is the whole point of doing this before code.
 
 ## Example
 

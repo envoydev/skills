@@ -37,7 +37,24 @@ A factual claim in a finding or a fix rationale is verified before it is stated 
 
 ## Output
 
-A ranked punch-list, most severe first - one line per finding: `severity | the defect (file:symbol) | the fix`. Quote the build/test output you ran and the live-probe result - the live-probe line is REQUIRED either way: the quoted probe output, or `live-probe: NOT RUN - <reason>` stated plainly; an Output section with neither is an incomplete review, and not-run is never a pass (measured: one review reported 'sound after one fix' with build+tests quoted and no live-probe line - the app could not boot its HTTP wiring). If the code is sound, say so plainly and name what you checked and ran. Every finding keyed to a file + symbol so a fix lands exactly there. Nothing you could not verify is reported as unverified - unverified is never a pass. Hand the list back; this skill does not apply fixes.
+**Four named fields, every run, each with a value.** A controlled measurement in one report step:
+five NAMED fields were emitted 5 of 5 times, while the same step's prose condition was emitted 0 of
+1 - so if it must happen every time, it is a field with a value, not a sentence about when to write
+one. None of these four was emitted in the measured review, and the user asked 'have you fixed
+everything?' 76 seconds later.
+
+```
+Build:      <the command and its verdict line, quoted>
+Live-probe: <the quoted probe output, or NOT RUN - <reason>>
+Findings:   <count by severity, or `none`>
+Next run:   <what the next pass must cover, or `nothing owed`>
+```
+
+`none` and `nothing owed` are answers; an omitted line is not, and a NOT RUN live-probe is never a
+pass (measured: one review reported 'sound after one fix' with build and tests quoted and no
+live-probe line - the app could not boot its HTTP wiring).
+
+Then the body: a ranked punch-list, most severe first - one line per finding: `severity | the defect (file:symbol) | the fix`. If the code is sound, say so plainly and name what you checked and ran. Every finding keyed to a file + symbol so a fix lands exactly there. Nothing you could not verify is reported as unverified - unverified is never a pass. Hand the list back; this skill does not apply fixes.
 
 When the review is the pre-commit checkpoint (a commit is the next act) and the verdict is sound - or sound after fixes that landed and re-verified - write the gate receipt `<docs-path>/flow/COMMIT-GATE` with five lines - `VERIFIED <what was reviewed, one phrase>`, `authorized: "<the user's words asking for THIS commit, verbatim>"` (or `answered: <the chosen option label>` when they picked rather than typed), `head: <the sha reviewed>`, `spec: <N files>` and `live-probe: <what you ran, or NOT RUN - <reason>>`. The VERIFIED line proves the review ran, the authorized line proves the user asked (on auth/crypto/secrets/payment/data-access diffs only after the `/security-review` pass baseline-security requires). When the consent words do not exist yet - the review ran ahead of the ask - write the VERIFIED line now and append the authorized line at the commit turn, before the commit call; write the receipt as its OWN tool call, never inside the commit's compound command. The `guard-ungated-commit` hook blocks a non-trivial commit without all of them, and an INLINE review's Output may live in the receipt provided every required field is present. A punch-list with unresolved BLOCKER/MATERIAL findings writes no receipt.
 
