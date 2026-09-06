@@ -9,13 +9,20 @@ name: lint
 # lockfile), so this job runs lock-free: no setup-node `cache: npm` and no
 # `npm ci` - both require a committed lockfile and fail without one. `npm install`
 # resolves the single lint dep (js-yaml) fresh each run.
+#
+# Run on all three platforms: the lint reads files and compares paths, and a path comparison is
+# where the platforms disagree first.
 on:
   push:
   pull_request:
 
 jobs:
   lint:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4

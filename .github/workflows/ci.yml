@@ -5,8 +5,14 @@ name: test
 # stack graph, plugin skills, analyze-usage) so a develop -> main merge (the release act -
 # it republishes the rolling 'latest' archive) only ever promotes a green tree.
 #
-# Lock-free like lint.yml (the root package-lock.json is deliberately untracked), and
-# node 22 because `npm test` uses a glob with `node --test`.
+# Lock-free like lint.yml (the root package-lock.json is deliberately untracked).
+#
+# THREE operating systems, because the suite drives real hooks through real paths and the
+# platforms disagree about them: separators, an absolute path's shape, case sensitivity, and
+# which spelling of a Windows path node resolves against the current drive. Ubuntu alone said
+# green while `npm test` on Windows ran ZERO tests and exited 0 - the script passed its glob
+# through the shell, and cmd.exe does not strip single quotes, so node matched nothing and the
+# gate reported success. A gate that cannot fail is not a gate.
 
 on:
   push:
@@ -14,7 +20,11 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
       # Full fetch + a local main ref: the installer tests exercise the fallback clone,
       # which is pinned to -b main (the release branch), against THIS checkout - so
