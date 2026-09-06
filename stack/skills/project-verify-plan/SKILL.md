@@ -17,18 +17,27 @@ Audit inline in this chat, the four passes below. On an agents request, dispatch
 - Not code review - that is `project-verify-code`, after the build.
 - Not plan *creation* - that is `superpowers:writing-plans` / `superpowers:brainstorming`. This audits a plan that already exists.
 
-## The audit - four passes, in order
+## The audit - five passes, in order
 
 Load the plan's target stack skill FIRST, so you check against the right trap list, not a generic one.
 
 1. **Risk coverage - the highest-leverage pass.** Check the plan's `Oriented:` header line first (`project-solution-design` writes it - what oriented the design, which house skills it loaded): a plan missing the line, or naming no house skill with no reason, is itself a MAJOR finding - the design ran blind. Check the CLAIM, not just the field: the line must cite its evidence (the doc range read, the symbol calls made), and where the audit runs in the same session the cited reads must actually exist in it - a filled-in header over reads that never happened passed this gate verbatim while zero orientation occurred (measured: 'ARCHITECTURE.md plus a bounded symbol pass over six surfaces' with no read of the doc anywhere in the session and one symbol call against six claimed). An unevidenced `Oriented:` line is the SAME MAJOR finding as a missing one. Stamp what you verified into the gate line: `Oriented: verified` or `Oriented: MISSING/unevidenced`, so a later scoped re-audit cannot silently inherit the gap (measured: two gate passes over one plan, neither flagged the absent header). Then: does the plan NAME the non-obvious failure modes this feature will hit? Do not carry a generic checklist - load the stack's house skill (the same one your project's convention rules auto-attach for its file types; its router names the specialist siblings) and check the plan against ITS trap list: the data-access, lifecycle, concurrency, and boundary traps that stack actually has. A trap the plan does not name is a trap the build inherits - flag each missing one and where in the plan it belongs.
 2. **Scope match.** The plan covers exactly what was asked - nothing missing, nothing speculative added. A step for a requirement that is not there, or a missing step for one that is, is a finding.
-3. **Edges + safety.** Boundary, empty, and error cases are named, not assumed. Any auth / migration-order / data-loss / concurrency surface is called out WITH its safeguard. Silence on a safety-critical edge is a finding.
-4. **Soundness.** The approach matches the repo's existing architecture (match it, never introduce a second), dependencies are ordered, and it is the smallest plan that meets the requirement - and its seams pass the design rules `project-solution-design` decides against: a task boundary that splits one axis of change across two tasks, an interface with one implementation and no credible second, a pattern with no trigger yet in the code, a task whose failure exits name no `log_points` (a silent failure designed in) - each a finding against the PLAN, with the breakage named, never a letter of SOLID alone.
+3. **Existence.** Every thing the plan NAMES is checked to exist before the plan passes: a symbol,
+   a file, a config key, a CSS or design token, an API the plan calls, a package version floor, a
+   capability it assumes a tool or seat has. Check it - `find_symbol`, a read of the config, a
+   context7 lookup for the external ones - and mark anything you could not confirm `unverified` in
+   the finding, never in the plan's prose as fact. This pass exists because asserted existence is
+   the most expensive defect class in the corpus: an invented CSS token plus two wrong test
+   predictions cost 2,663,771 tokens to repair, and a false capability claim propagated through a
+   DURABLE doc over six escalating hops (790,759 tokens of recovery) after being certified twice by
+   a report that never checked it.
+4. **Edges + safety.** Boundary, empty, and error cases are named, not assumed. Any auth / migration-order / data-loss / concurrency surface is called out WITH its safeguard. Silence on a safety-critical edge is a finding.
+5. **Soundness.** The approach matches the repo's existing architecture (match it, never introduce a second), dependencies are ordered, and it is the smallest plan that meets the requirement - and its seams pass the design rules `project-solution-design` decides against: a task boundary that splits one axis of change across two tasks, an interface with one implementation and no credible second, a pattern with no trigger yet in the code, a task whose failure exits name no `log_points` (a silent failure designed in) - each a finding against the PLAN, with the breakage named, never a letter of SOLID alone.
 
 ## Output
 
-**Five named fields, every run, each with a value** - a controlled measurement put named fields at
+**Six named fields, every run, each with a value** - a controlled measurement put named fields at
 5 of 5 emitted against a prose condition at 0 of 1, so anything that must happen every time is a
 field, not a sentence about when to write one:
 
@@ -36,6 +45,7 @@ field, not a sentence about when to write one:
 Oriented:  verified | MISSING/unevidenced
 Decisions: <N entries, each with its precedent> | ABSENT
 Scope:     matches | <what is missing or speculative>
+Existence: <N names checked, N unverified> | nothing named
 Findings:  <count by severity, or `none`>
 Gated:     passed | <N> gaps listed - <date>
 ```
