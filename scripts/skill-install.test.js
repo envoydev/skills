@@ -386,11 +386,19 @@ test('sh update --installed-only carries plugins into the refresh plan', () => {
         const nobin = path.join(work, 'nobin');
         fs.mkdirSync(nobin);
         const bash = fs.existsSync('/bin/bash') ? '/bin/bash' : 'bash';
+        // node stays reachable (the .mcp.json read needs it); `claude` must not be. The system
+        // half of the PATH is platform-shaped: `:` and /usr/bin:/bin are POSIX spellings, and on
+        // Windows they left the child with a PATH holding nothing - not even the bash node was
+        // asked to spawn, so spawnSync failed outright and `status` came back null, not an exit
+        // code. There the real PATH is kept, minus any directory that actually holds a claude.
+        const claudeIn = (d) => ['claude', 'claude.exe', 'claude.cmd', 'claude.ps1'].some((n) => fs.existsSync(path.join(d, n)));
+        const system = process.platform === 'win32'
+            ? (process.env.PATH || '').split(path.delimiter).filter((d) => d && !claudeIn(d))
+            : ['/usr/bin', '/bin'];
         const res = spawnSync(bash, [SH, 'update', '--scope', 'project', '--installed-only', '--print-plan'], {
             cwd: work,
             encoding: 'utf8',
-            // node stays reachable (the .mcp.json read needs it); `claude` does not
-            env: { ...process.env, PATH: `${nobin}:${path.dirname(process.execPath)}:/usr/bin:/bin`, STACK_SKILLS_REPO: SRC_REPO, HOME: work },
+            env: { ...process.env, PATH: [nobin, path.dirname(process.execPath), ...system].join(path.delimiter), STACK_SKILLS_REPO: SRC_REPO, HOME: work },
         });
         assert.strictEqual(res.status, 0, `exit 0: ${res.stderr}`);
         const plan = (res.stdout.split('\n').find((l) => l.startsWith('plan plugins:')) || '');

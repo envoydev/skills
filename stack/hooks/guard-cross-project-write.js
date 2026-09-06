@@ -125,7 +125,11 @@ function realish(p) {
 }
 const ROOT = real(root);
 const HOME = os.homedir() || '';
-const expandTilde = (p) => (p === '~' || p.startsWith('~/')) && HOME ? path.join(HOME, p.slice(1)) : p;
+// `~\\x` is the Windows spelling of the same thing, and CLAUDE_STACK_ALLOW_WRITE_OUTSIDE is
+// where a user writes one by hand - unexpanded, the allowance stays a literal `~...` string,
+// matches no path, and the tree the project genuinely owns is blocked (measured on windows-latest).
+const expandTilde = (p) => (p === '~' || p.startsWith('~/') || (process.platform === 'win32' && p.startsWith('~\\')))
+  && HOME ? path.join(HOME, p.slice(1)) : p;
 
 // Anything under one of these may be written even though it is outside the project: the
 // session's own scratch, the account-level Claude config (memory writes land here - blocking
@@ -187,6 +191,12 @@ function otherProjectName(target) {
   const rootParts = ROOT.split(path.sep);
   let i = 0;
   while (i < parts.length && i < rootParts.length && parts[i] === rootParts[i]) i++;
+  // On win32 the DRIVE LETTER is the root segment - the analogue of the empty string POSIX
+  // absolute paths start with - so a target on another drive diverges at index 0 and 'D:' was
+  // reported as the other project's name. That also hid the glob bail-out below from a target
+  // like `/run*.log`, which resolves onto the cwd's drive: the divergence was the drive, not the
+  // glob, so a session cleaning its own scratch was blocked and told to hand off to 'D:'.
+  if (parts[i] === '' || /^[A-Za-z]:$/.test(parts[i] || '')) i++;
 
   return parts[i] || path.basename(path.dirname(realish(target)));
 }
@@ -314,7 +324,13 @@ function judge(rawIn, index, what) {
   const raw = expandVars(rawIn);
   if (isVar(raw)) return; // an unexpanded variable - cannot judge, don't guess
   const base = anchorAt(index);
-  const explicit = /^([~/]|\.\.[/\\])/.test(raw) || raw.includes('/../') || raw === '..';
+  // `C:\\other\\f.txt` and `\\\\server\\share\\f.txt` are as explicit as a leading `/`, but neither
+  // matches the POSIX spellings - so on Windows EVERY shell write to an absolute path fell
+  // through this early return unjudged, while the same reach through Write/Edit was blocked
+  // (measured on windows-latest: 5 of the guard's own shell cases passed the write through).
+  const WIN_ABS = /^(?:[A-Za-z]:[\\/]|\\\\)/;
+  const explicit = /^([~/]|\.\.[/\\])/.test(raw) || (process.platform === 'win32' && WIN_ABS.test(raw))
+    || raw.includes('/../') || raw === '..';
   if (!explicit && base === ROOT) return;
   const expanded = nativePath(expandTilde(raw));
   if (!path.isAbsolute(expanded) && base === null) return; // relative from an unknown anchor
