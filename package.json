@@ -7,7 +7,8 @@
   "scripts": {
     "lint": "node scripts/lint-skills.js",
     "graph": "node scripts/stack-graph.js --write",
-    "test": "node --test 'scripts/**/*.test.js'"
+    "test": "node --test 'scripts/**/*.test.js'",
+    "corpus": "node scripts/corpus-replay.js"
   },
   "devDependencies": {
     "js-yaml": "^4.1.0"
