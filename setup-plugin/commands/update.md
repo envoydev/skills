@@ -96,7 +96,19 @@ environment plan, no question on this path: when sentry is installed, read the A
 close-out, with the file path - any of `SENTRY_SLUG` and (token mode) `SENTRY_ACCESS_TOKEN` still
 missing: the user adds them there by hand (`{ "env": { "SENTRY_SLUG": "<org>[/<project>]",
 "SENTRY_ACCESS_TOKEN": "<token>" } }`; never a project-level `.claude/settings.json`, its env does
-not reach `.mcp.json`), or runs `/claude-stack:configure`, whose sentry plan asks the slug. Then:
+not reach `.mcp.json`), or runs `/claude-stack:configure`, whose sentry plan asks the slug. The
+slug is not a secret and can be typed anywhere; the TOKEN never travels through the chat - offer
+this copy-ready command with that line, so the value goes from the user's clipboard into the file
+without passing through a transcript (it is not echoed, and it is not a shell argument either):
+
+```bash
+python3 -c "import getpass,json,pathlib;f=pathlib.Path('~/.claude/settings.json').expanduser();d=json.loads(f.read_text() or '{}') if f.exists() else {};d.setdefault('env',{})['SENTRY_ACCESS_TOKEN']=getpass.getpass('token (not echoed): ');f.parent.mkdir(parents=True,exist_ok=True);f.write_text(json.dumps(d,indent=2))"
+```
+
+On Windows: `$t = Read-Host 'token' -AsSecureString`, then write the same key with
+`ConvertFrom-SecureString -AsPlainText`. If the user pastes the token into the chat anyway, use it
+for what they asked and END THE TURN on the rotation ask - it is in the transcript on disk now, and
+that is their decision to make, not one to leave unsaid. Then:
 
 - The compare showed `stack/CLAUDE.template.md` modified -> reconcile the project's CLAUDE.md
   additively (step 6). Otherwise skip it without reading either file.

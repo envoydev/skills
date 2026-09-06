@@ -23,7 +23,9 @@ trail).
 - Never log PII, tokens, passwords, or full payment data - and a change that WIDENS logging (a
 default flipped verbose, a redaction removed, a new sink) is itself security-relevant work riding
 the review path above (measured: a logging-default flip shipped unredacted tokens).
-- Hardcoded secret found: stop, flag, redact as `<redacted>`, recommend rotation + git-history removal. Never propagate the value into any tool.
-- `permissions.deny` blocks reading secret files (`.env*`, key/cert globs) but not arbitrary subprocesses - never read or echo a secret's value by any route.
+- Hardcoded secret found: stop, flag, redact as `<redacted>`, recommend rotation + git-history removal. Never propagate the value into any tool. And the turn does not end on that bullet - it ends on the ask (rotate now / acknowledge and defer), because a discovered exposure stated as prose was abandoned in 3 of 3 measured sessions.
+- `permissions.deny` blocks the Read TOOL on secret files (`.env*`, key/cert globs, the account settings.json) and NOTHING else - not a shell `cat`, not a subprocess. Measured: an account carrying `Read(**/config.json)` returned two Bash `cat`s of a config.json unblocked. The rule below is the only thing covering those routes.
+- Reading a credential means reading its PRESENCE, never its value: report `SENTRY_ACCESS_TOKEN=set (71 chars)` or `absent`, and check a generated artifact by grepping for the prefix and reporting the count. Never echo the value, never pass a pasted secret to a tool, and never ask for one through the chat - a value that must be set goes into the file by the user's own hand, or by a copy-ready command they run in their terminal.
+- When the user does paste a credential anyway, use it for the job they asked for and end the turn on the rotation ask: it is now in the transcript on disk, and that is a fact the user has to decide about, not one to leave unsaid.
 
 <!-- Maintainer note: extend the deny list in settings.json with the stack's own secret/config globs. -->

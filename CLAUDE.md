@@ -30,15 +30,24 @@ change made only inside a consuming project is throwaway (see Invariants).
   `guard-read-whole-file.js` (PreToolUse `Read` + `Bash` - the same dump routed through the shell) + `guard-unapproved-dispatch.js` (PreToolUse
   `Task|Agent` - blocks an `*-implementer` dispatch without the `<docs-path>/flow/APPROVAL` gate
   file the flows write on explicit user approval or an explicit AUTO waiver, and blocks a generic `general-purpose`/`claude` dispatch while that stamp is live; stamps older than 8h or older than the session are absent; also blocks an `Explore`/generic dispatch whose brief asks a SYMBOL question - callers, declaration site, resolved type - since a grep-shaped seat answers those by name-match and the built-in `Explore` loads none of the project's rules) +
-  `guard-ungated-commit.js` (PreToolUse `Bash` - blocks a non-trivial `git commit` without the
+  `guard-ungated-commit.js` (PreToolUse `Bash` - the publish ceremony, both halves in one hook because
+  they share the receipt machinery and the heredoc/quote masking: blocks a non-trivial `git commit` without the
   `<docs-path>/flow/COMMIT-GATE` receipt the pre-commit checkpoint writes on VERIFIED gates or an
-  explicit user waiver; trivial diffs pass) +
+  explicit user waiver (trivial diffs pass), and blocks `git push` / `gh pr merge` without the same-shaped
+  `<docs-path>/flow/PUSH-GATE` receipt - nothing gated publishing before, and across four audited sessions
+  every push and merge passed every guard, one putting 40 files on a shared `develop`. A dry run or a branch
+  level with its upstream publishes nothing and is never gated; `CLAUDE_STACK_PUSH_GATE=0` turns that half
+  off where the remote is already gated) +
   `guard-stop-contract.js` (dual-wired: a `Stop` hook that blocks a turn ending on a
-  decision-shaped question in prose, or on a 'done, next step pending' close stated as fact - the blocking-ask mandate mechanized - and, on a CLEAN close past 40% of the context window (`CLAUDE_STACK_FRESH_SESSION_PCT`, floored at the measured 150k on the 200k tier only - so 150k on a 200k window, 400k on a 1M one; the window itself resolves in three layers, `CLAUDE_STACK_CONTEXT_WINDOW` first, then the settings.json model id's own `[1m]`-style suffix - the ONLY readable source that keeps it, since the transcript strips it - then what the session has already carried, latched once proven. Both env values are seeded absent-only by the installers, because the percentage alone is inert below 76 on the inferred 200k tier), holds the turn ONCE so the user is asked whether to resume in a fresh session; it re-arms only when the context has grown 1.5x, and it fires after the work is finished, never mid-response - the PreToolUse `AskUserQuestion` wiring that used to deny the ask itself is gone - new installs do not wire it and a migration unwires it from old ones) +
-  `guard-fresh-session-start.js` (PreToolUse `Skill` - blocks a deliberate orchestration run
-  (a capture, a loop, a solve flow) from starting on another finished run's carried history past
-  the same window-scaled trigger (the fresh-session hook resolves the window the same three ways), routing the choice through AskUserQuestion; the capabilities rule's prose form
-  lost in 4 of 4 audited sessions) +
+  decision-shaped question in prose, or on a 'done, next step pending' close stated as fact - the blocking-ask mandate mechanized - and, on a CLEAN close past 40% of the context window (`CLAUDE_STACK_FRESH_SESSION_PCT`, floored at the measured 150k on the 200k tier and CAPPED at 250k above it - 40% of a 1M window is 400k, above the ~390k the harness itself auto-compacts at, so the gate could never fire on a 1M account; the window itself resolves in three layers, `CLAUDE_STACK_CONTEXT_WINDOW` first, then the settings.json model id's own `[1m]`-style suffix (the transcript strips it; `cost-state.modelUsage` keys off the same id and is the second source), then what the session has already carried, latched once proven. The percentage is seeded absent-only; the window box is seeded EMPTY, because the old `1000000` seed outranked every detection layer and killed the gate on every install that was not a 1M account), holds the turn ONCE so the user is asked whether to resume in a fresh session; it re-arms only when the context has grown 1.5x, and it fires after the work is finished, never mid-response - the PreToolUse `AskUserQuestion` wiring that used to deny the ask itself is gone - new installs do not wire it and a migration unwires it from old ones) +
+  `guard-fresh-session-start.js` (three routes into one decision - a deliberate orchestration run
+  (a capture, a loop, a solve flow, a review, one of the four guided plugin walks) must not start on another finished run's carried
+  history past the same window-scaled trigger (the same three-layer window resolution). PreToolUse `Skill`
+  BLOCKS it; `UserPromptSubmit` INJECTS the ask for the same run invoked as a slash command, which emits no
+  Skill event at all (measured: 4 of 4 runs slash-injected, zero Skill events in 45 messages) and never denies,
+  since a UserPromptSubmit denial erases the user's prompt; `SessionStart` matcher `compact` injects it at the
+  auto-compaction, which proves the session hit the ~390k ceiling at a moment a Stop may never come. The
+  capabilities rule's prose form lost in 4 of 4 audited sessions) +
   `guard-cross-project-write.js` (PreToolUse `Write`/`Edit`/`NotebookEdit`/`Bash` - one session
   belongs to ONE project: a write whose target resolves outside the project root is blocked, via
   the file tools or the shell routes around them (redirection, `tee`, in-place `sed`/`perl`, a `cp`/`mv`

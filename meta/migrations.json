@@ -1,5 +1,5 @@
 {
-  "_comment": "Retirements of GENERATED per-project artifacts - the cleanup the upstream file compare can never name, because generated output was never a stack-shipped file. The update command applies these (with the same one-gate consent as its prune list) and validate flags them; detection is existence-based, never version math, so a leftover is caught no matter how old the install. `unwire_settings_hook` names the hook file whose settings.json entry goes, optionally scoped to one matcher as `<file>::<Matcher>` when the file stays wired for its other events. Paths resolve against the install root (the project's .claude/ parent, or the account dir in global mode); a path that does not exist simply does not detect. Every entry names why the artifact is redundant and what regenerates its replacement. Two of these act on the scope's settings.json `env` rather than on a file: `detect.settings_env_key` fires when that key is present, and `rename_settings_env` ({from, to}) moves the user's VALUE to the new key and drops the old one. The installers' env pass applies the same pair on every install and update (the list is mirrored in both twins), so an env migration is REPORTED by the update command, never confirmed as a prune - nothing is deleted and a hand-set value is carried over, not reset to the default. New env keys need no entry: the installers seed them absent-only in the same pass.",
+  "_comment": "Retirements of GENERATED per-project artifacts - the cleanup the upstream file compare can never name, because generated output was never a stack-shipped file. The update command applies these (with the same one-gate consent as its prune list) and validate flags them; detection is existence-based, never version math, so a leftover is caught no matter how old the install. `unwire_settings_hook` names the hook file whose settings.json entry goes, optionally scoped to one matcher as `<file>::<Matcher>` when the file stays wired for its other events. Paths resolve against the install root (the project's .claude/ parent, or the account dir in global mode); a path that does not exist simply does not detect. Every entry names why the artifact is redundant and what regenerates its replacement. Three of these act on the scope's settings.json `env` rather than on a file: `detect.settings_env_key` fires when that key is present, `detect.settings_env_value` ({key, equals}) fires only when it still holds that exact value, `rename_settings_env` ({from, to}) moves the user's VALUE to the new key and drops the old one, and `clear_settings_env` ({key, when_value}) empties a key whose SEEDED DEFAULT turned out to be wrong - only when the value is still that seed, so a value the user set by hand is never touched. The installers' env pass applies the same pair on every install and update (the list is mirrored in both twins), so an env migration is REPORTED by the update command, never confirmed as a prune - nothing is deleted and a hand-set value is carried over, not reset to the default. New env keys need no entry: the installers seed them absent-only in the same pass.",
   "migrations": [
     {
       "id": "inject-code-style-hook-to-rule",
@@ -38,6 +38,23 @@
       },
       "why": "every other variable this stack owns is CLAUDE_STACK_*; the docs root was the one that was not, and a bare CLAUDE_DOCS_PATH reads as a Claude Code setting rather than a stack one",
       "then": "nothing - the value moves with the key, and the hooks read the old spelling as a fallback until the rename reaches every install"
+    },
+    {
+      "id": "context-window-seed-cleared",
+      "since": "0.2.55",
+      "detect": {
+        "settings_env_value": {
+          "key": "CLAUDE_STACK_CONTEXT_WINDOW",
+          "equals": "1000000"
+        }
+      },
+      "remove": [],
+      "clear_settings_env": {
+        "key": "CLAUDE_STACK_CONTEXT_WINDOW",
+        "when_value": "1000000"
+      },
+      "why": "the seed declared a 1M context window on EVERY install, and this value is the first layer of the fresh-session hooks' window resolution - so on any account that is not 1M the trigger sat above anything the session could ever carry and no fresh-session offer could fire (ten confirmations across four projects). Empty means auto-detect, which reads the settings model id's own window suffix and otherwise infers the tier the session has proven",
+      "then": "nothing - the box stays in settings.json, empty; fill it in only to overrule detection"
     }
   ]
 }

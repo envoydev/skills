@@ -108,7 +108,7 @@ values embedded in a registration - show `${VAR}` literally as written.
 | CLAUDE_AUTOCOMPACT_PCT_OVERRIDE | not set |
 | CLAUDE_STACK_INSTRUMENT | 0 (default - off) |
 | CLAUDE_STACK_FRESH_SESSION_PCT | 40 (default) - the fresh-session gate's share of the window; 0 = off |
-| CLAUDE_STACK_CONTEXT_WINDOW | 1000000 (default) - the window that percentage applies to; `200000` on a 200k model, empty = auto (the model id's `[1m]`-style suffix, else what the session has carried) |
+| CLAUDE_STACK_CONTEXT_WINDOW | empty (default - auto: the model id's `[1m]`-style suffix, else what the session has carried); a stated `1000000` / `200000` overrules that |
 | SENTRY_SLUG (account env) | set / not set - only when sentry is installed |
 | SENTRY_ACCESS_TOKEN (account env) | set / not set - only when sentry is installed and its registration carries a header |
 | CONTEXT7_API_KEY (account env) | set / not set - only when context7 is installed remote; not set = the keyless free tier |
@@ -116,7 +116,7 @@ values embedded in a registration - show `${VAR}` literally as written.
 Stamp from `claude-stack.stamp` (`no stamp - source never resolved at install time` when
 absent); env values from `settings.json` `env`, marking `(default)` when the key is absent and
 a house default applies. The sentry and context7 rows read the ACCOUNT `settings.json` (`~/.claude/settings.json`,
-or the space's - the file `.mcp.json` expansion reads) and show presence only, never the value; a
+or the space's - the file `.mcp.json` expansion reads) and show presence only, never the value. That holds for ANY key, not just these three: a key matching the catalog's `secret_key_pattern` (`meta/environment.json`) or a row flagged `secret: true` is printed as `set (N chars)` or `absent`, never by value; a
 sentry `not set` row ends with `-> add it there (or /claude-stack:configure)` (context7 unset is a
 working free tier - no arrow, the registration sends an empty header). This table names values only - changing them is `configure`'s
 environment area.

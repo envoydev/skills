@@ -77,3 +77,15 @@ cap exists for. A commit in a second tree this session may write (the cross-proj
 allowance, for a tree the project owns) gets its own receipt in THAT tree's docs root, written and
 cleared the same way; a sibling repo is never committed from here - its change is a task card
 under `<docs-path>/cross-project-tasks/`.
+
+**Publishing has the same ceremony.** `git push` and `gh pr merge` are where the work leaves this
+machine - other people and CI get it, and a shared branch cannot be un-pushed quietly - so they
+carry their own receipt, `<docs-path>/flow/PUSH-GATE`, in the SAME shape: `VERIFIED <what is being
+published, one phrase>` plus `authorized: "<the user's words asking for THIS publish, verbatim>"`,
+or `WAIVED - "<their words>"`. Say what is going out and to which branch, get the answer, write the
+receipt as its own call, publish, clear it. `guard-ungated-commit` enforces this half too (measured:
+across four audited sessions every push and merge passed every guard - one published unpushed
+commits 18 minutes before any receipt existed, another put 40 files on a shared `develop`). A push
+that publishes nothing - a dry run, or a branch already level with its upstream - is never gated,
+and a repo whose remote is already gated by branch protection or a required review turns the half
+off for good with `CLAUDE_STACK_PUSH_GATE=0` in the settings.json env block.

@@ -825,16 +825,25 @@ test('sh env: both fresh-session knobs are seeded, and a hand-edited value is ne
         assert.strictEqual(wire(fresh).status, 0);
         const env = JSON.parse(fs.readFileSync(fresh, 'utf8')).env;
         assert.strictEqual(env.CLAUDE_STACK_FRESH_SESSION_PCT, '40', 'the gate percentage is seeded at the house default');
-        assert.strictEqual(env.CLAUDE_STACK_CONTEXT_WINDOW, '1000000', 'the window is seeded with a stated number, not an empty box nobody fills in');
+        assert.strictEqual(env.CLAUDE_STACK_CONTEXT_WINDOW, '', 'the window box is seeded EMPTY - empty means auto-detect');
         assert.strictEqual(env.CLAUDE_STACK_DOCS_PATH, '.claude/docs', 'the existing three are untouched');
 
         // update over a hand-edited install: absent-only, so both stay exactly as the user left them
         const pinned = path.join(work, 'pinned.json');
-        fs.writeFileSync(pinned, JSON.stringify({ env: { CLAUDE_STACK_FRESH_SESSION_PCT: '60', CLAUDE_STACK_CONTEXT_WINDOW: '1000000' } }));
+        fs.writeFileSync(pinned, JSON.stringify({ env: { CLAUDE_STACK_FRESH_SESSION_PCT: '60', CLAUDE_STACK_CONTEXT_WINDOW: '200000' } }));
         assert.strictEqual(wire(pinned).status, 0);
         const kept = JSON.parse(fs.readFileSync(pinned, 'utf8')).env;
         assert.strictEqual(kept.CLAUDE_STACK_FRESH_SESSION_PCT, '60', 'a pinned percentage survives the update');
-        assert.strictEqual(kept.CLAUDE_STACK_CONTEXT_WINDOW, '1000000', 'a declared window survives the update');
+        assert.strictEqual(kept.CLAUDE_STACK_CONTEXT_WINDOW, '200000', 'a declared window survives the update');
+
+        // ...but the RETIRED 1000000 seed is cleared, because it was never the user's number: it
+        // declared a 1M window on every install and put the trigger above anything a 200k session
+        // can carry, so no fresh-session offer could ever fire (ten confirmations, four projects).
+        const stale = path.join(work, 'stale.json');
+        fs.writeFileSync(stale, JSON.stringify({ env: { CLAUDE_STACK_CONTEXT_WINDOW: '1000000' } }));
+        assert.strictEqual(wire(stale).status, 0);
+        assert.strictEqual(JSON.parse(fs.readFileSync(stale, 'utf8')).env.CLAUDE_STACK_CONTEXT_WINDOW, '',
+            'the old seed is cleared back to auto-detect');
     }
     finally { fs.rmSync(work, { recursive: true, force: true }); }
 });
@@ -847,6 +856,7 @@ test('ps1 env: the same two knobs, same rule (pwsh required)', { skip: skipNoPws
         const settings = path.join(repo, '.claude', 'settings.json');
         fs.writeFileSync(settings, JSON.stringify({ env: { CLAUDE_STACK_FRESH_SESSION_PCT: '60' } }, null, 2));
         const harness = path.join(repo, 'harness.ps1');
+        const pass1 = path.join(repo, 'pass1.json');
         fs.writeFileSync(harness, [
             'function Log { param([string]$m) Write-Host "LOG: $m" }',
             `function Get-RepoRoot { return ${JSON.stringify(repo)} }`,
@@ -857,13 +867,21 @@ test('ps1 env: the same two knobs, same rule (pwsh required)', { skip: skipNoPws
             psFunc(src, 'Write-JsonFile'),
             psFunc(src, 'Set-HookSettings'),
             'Set-HookSettings',
+            `Copy-Item ${JSON.stringify(settings.replace(/\\/g, '/'))} ${JSON.stringify(pass1.replace(/\\/g, '/'))}`,
+            // second pass over a settings file still carrying the RETIRED 1000000 seed
+            `Set-Content -Path ${JSON.stringify(settings.replace(/\\/g, '/'))} -Value '{ "env": { "CLAUDE_STACK_CONTEXT_WINDOW": "1000000" } }'`,
+            'Set-HookSettings',
         ].join('\n'));
         const res = spawnSync('pwsh', ['-NoProfile', '-File', harness], { cwd: repo, encoding: 'utf8' });
         assert.strictEqual(res.status, 0, res.stderr);
+        const first = JSON.parse(fs.readFileSync(pass1, 'utf8')).env;
+        assert.strictEqual(first.CLAUDE_STACK_FRESH_SESSION_PCT, '60', 'the hand-edited percentage is left alone');
+        assert.strictEqual(first.CLAUDE_STACK_CONTEXT_WINDOW, '', 'the absent window is seeded EMPTY - empty means auto-detect');
         const env = JSON.parse(fs.readFileSync(settings, 'utf8')).env;
-        assert.strictEqual(env.CLAUDE_STACK_FRESH_SESSION_PCT, '60', 'the hand-edited percentage is left alone');
-        assert.strictEqual(env.CLAUDE_STACK_CONTEXT_WINDOW, '1000000', 'the absent window is seeded with the stated default');
-        assert.strictEqual(env.CLAUDE_STACK_INSTRUMENT, '0', 'and the existing seeds still land');
+        assert.strictEqual(env.CLAUDE_STACK_INSTRUMENT, '0', 'the existing seeds still land');
+        // the first pass proved the absent-only seeds; this is the retired value being cleared
+        assert.strictEqual(env.CLAUDE_STACK_CONTEXT_WINDOW, '', 'the retired 1000000 seed is cleared back to auto-detect');
+        assert.strictEqual(env.CLAUDE_STACK_FRESH_SESSION_PCT, '40', 'and the percentage is re-seeded at the house default');
     }
     finally { fs.rmSync(repo, { recursive: true, force: true }); }
 });

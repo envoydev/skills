@@ -132,11 +132,16 @@ test('guard-fresh-session-start: the threshold scales with the context window', 
     { tool_name: 'Skill', tool_input: { skill: 'project-quality-loop' }, transcript_path: tp },
     { env: { ...process.env, ...(env || {}) } }).status;
 
+  const w1m = (env) => ({ CLAUDE_STACK_CONTEXT_WINDOW: '1000000', ...(env || {}) });
   assert.equal(call(at('w-200k', 190000)), 2, '190k on a 200k window is past the 150k floor');
-  assert.equal(call(at('w-1m-300k', 300000)), 0, '300k on a 1M window is only 30% - not yet worth a fresh session');
-  assert.equal(call(at('w-1m-450k', 450000)), 2, '450k on a 1M window is past 40%');
-  assert.equal(call(at('w-1m-450k', 450000), { CLAUDE_STACK_FRESH_SESSION_PCT: '60' }), 0, 'the percentage is tunable');
-  assert.equal(call(at('w-1m-650k', 650000), { CLAUDE_STACK_FRESH_SESSION_PCT: '60' }), 2, '... and still fires at its own step');
+  // Above the 200k tier the trigger is CAPPED at 250k: 40% of 1M is 400k, which is ABOVE the
+  // ceiling the harness itself enforces (~390k measured), so the percentage alone could never fire.
+  assert.equal(call(at('w-1m-200k', 200000), w1m()), 0, '200k on a 1M window is under the 250k ceiling');
+  assert.equal(call(at('w-1m-300k', 300000)), 2, '300k on a 1M window is past it');
+  assert.equal(call(at('w-1m-450k', 450000)), 2, '... and so is 450k');
+  assert.equal(call(at('w-1m-450k-p60', 450000), { CLAUDE_STACK_FRESH_SESSION_PCT: '60' }), 2, 'a percentage ABOVE the ceiling does not lift it');
+  assert.equal(call(at('w-1m-100k-p15', 100000), w1m({ CLAUDE_STACK_FRESH_SESSION_PCT: '15' })), 0, 'a percentage BELOW the ceiling is the trigger');
+  assert.equal(call(at('w-1m-160k-p15', 160000), w1m({ CLAUDE_STACK_FRESH_SESSION_PCT: '15' })), 2, '... and fires at its own step');
 });
 
 // ---- hooks audit: every gate branch pinned in both directions (block AND the exemption) ----
@@ -290,6 +295,64 @@ test('guard-ungated-commit: a cd or -C into a sibling repo judges THAT tree', ()
   assert.equal(gateIn(home, `git -C "${sib}" commit -am x`), 2, '-C into the dirty sibling');
 });
 
+// A clone with a real upstream, so `git log @{u}..HEAD` answers - the publish gate's
+// nothing-to-publish exemption reads it.
+function pushRepo() {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'push-'));
+  spawnSync('git', ['init', '-q', '--bare', path.join(base, 'remote.git')], { encoding: 'utf8' });
+  const dir = path.join(base, 'repo');
+  spawnSync('git', ['clone', '-q', path.join(base, 'remote.git'), dir], { encoding: 'utf8' });
+  const git = (...a) => spawnSync('git', ['-C', dir, ...a], { encoding: 'utf8' });
+  git('config', 'user.email', 't@example.com'); git('config', 'user.name', 'test');
+  fs.writeFileSync(path.join(dir, 'a.txt'), 'seed\n');
+  git('add', '-A'); git('commit', '-qm', 'seed'); git('branch', '-M', 'main'); git('push', '-q', '-u', 'origin', 'main');
+  return dir;
+}
+
+test('guard-ungated-commit: nothing gated a push, and a quoted publish verb is still prose', () => {
+  // Four bundles: `git push` and `gh pr merge` passed EVERY guard on replay. One session's first
+  // state-changing act published unpushed commits 18 minutes before any receipt existed, and 40
+  // files reached a shared develop ungated. The gate ships with the heredoc + quote masking or it
+  // reproduces the measured 430,740-token false positive - a report write denied for QUOTING a
+  // merge command.
+  const dir = pushRepo();
+  const flow = path.join(dir, '.claude', 'docs', 'flow');
+  fs.mkdirSync(flow, { recursive: true });
+  const receipt = (s) => (s === null ? fs.rmSync(path.join(flow, 'PUSH-GATE'), { force: true }) : fs.writeFileSync(path.join(flow, 'PUSH-GATE'), s));
+  const ahead = () => { fs.appendFileSync(path.join(dir, 'a.txt'), 'more\n'); spawnSync('git', ['-C', dir, 'commit', '-qam', 'work'], { encoding: 'utf8' }); };
+
+  assert.equal(gateIn(dir, 'git push'), 0, 'nothing ahead of the upstream publishes nothing');
+  ahead();
+  assert.equal(gateIn(dir, 'git push'), 2, 'commits ahead, no receipt');
+  assert.equal(gateIn(dir, 'git push --dry-run'), 0, 'a dry run publishes nothing');
+  assert.equal(gateIn(dir, 'git push -n'), 0, '... and so does -n');
+  assert.equal(gateIn(dir, 'gh pr merge 12 --squash'), 2, 'a merge lands code on the default branch');
+
+  receipt('VERIFIED the release merge\n');
+  assert.equal(gateIn(dir, 'git push'), 2, 'VERIFIED without the authorized line is not consent');
+  receipt('VERIFIED the release merge\nauthorized: "push it"\n');
+  assert.equal(gateIn(dir, 'git push'), 0, 'VERIFIED plus quoted consent');
+  receipt('WAIVED - "just push"\n');
+  assert.equal(gateIn(dir, 'git push'), 0, 'an explicit waiver');
+  const old = (Date.now() - 3 * 3600 * 1000) / 1000;
+  fs.utimesSync(path.join(flow, 'PUSH-GATE'), old, old);
+  assert.equal(gateIn(dir, 'git push'), 2, 'a 3h-old receipt is absent');
+  receipt(null);
+  assert.equal(gateIn(dir, `printf 'VERIFIED x\\nauthorized: "go"\\n' > .claude/docs/flow/PUSH-GATE && git push`), 0,
+    'the atomic write+publish shape carries its own receipt');
+  assert.equal(gateIn(dir, 'git push', { CLAUDE_STACK_PUSH_GATE: '0' }), 0, 'the switch turns the publish half off');
+
+  // the false-positive class this gate must never reproduce
+  assert.equal(gateIn(dir, "cat > report.md <<'EOF'\nThen run `gh pr merge 12 --squash` and `git push`.\nEOF"), 0,
+    'a report that QUOTES a publish verb is prose - the 430,740-token false positive');
+  assert.equal(gateIn(dir, 'echo "then git push to develop"'), 0, 'so is an echo');
+  assert.equal(gateIn(dir, "grep -o 'git push' transcript.jsonl"), 0, 'so is a grep for push events');
+  assert.equal(gateIn(dir, 'git commit -m "prep for git push"'), 0, 'a clean tree fires neither gate');
+  fs.writeFileSync(path.join(dir, 'big.txt'), forty());
+  spawnSync('git', ['-C', dir, 'add', '-A'], { encoding: 'utf8' });
+  assert.equal(gateIn(dir, 'git commit -m "prep for git push"'), 2, 'and a dirty one fires the COMMIT gate, not the publish one');
+});
+
 test('guard-unapproved-dispatch: the stamp lifecycle', () => {
   const root = fs.mkdtempSync(path.join(TMP, 'proj-'));
   const gate = path.join(root, '.claude', 'docs', 'flow', 'APPROVAL');
@@ -420,7 +483,7 @@ test('guard-stop-contract: the fresh-session offer lands at turn end, once per c
   const stop = (tp) => runIn('guard-stop-contract.js', { hook_event_name: 'Stop', transcript_path: tp },
     { env: { ...process.env, CLAUDE_STACK_HOOK_LOG_DIR: logDir } }).status;
 
-  assert.equal(stop(at('fs-cold', 300000)), 0, '300k on a 1M window is under 40% - nothing to offer');
+  assert.equal(stop(at('fs-cold', 220000)), 0, '220k on a 1M window is under the 250k trigger - nothing to offer');
   const s1 = at('fs-hot', 500000);
   assert.equal(stop(s1), 2, 'a CLEAN close past the trigger: held once so the user is asked');
   assert.equal(stop(s1), 0, 'the same session again - already asked at this cost step');
@@ -727,6 +790,44 @@ function accountDir(name, model) {
   return d;
 }
 
+test('guard-fresh-session-start: the slash and compaction routes carry the same offer', () => {
+    // The Skill route reaches only a run invoked as a Skill CALL. Measured across four bundles:
+    // 4 of 4 orchestration runs arrived slash-injected, ZERO Skill tool_use events in 45 messages,
+    // two captures entered at 150.4k and 164.5k - both past the floor, both ungated. And a long
+    // agentic turn emits no Stop either (23m27s / 277 messages / +178k ctx, zero Stop events), so
+    // the compaction the harness DOES guarantee is the third route.
+    const ups = (prompt, tp, env) => runIn('guard-fresh-session-start.js',
+        { hook_event_name: 'UserPromptSubmit', prompt, transcript_path: tp }, { env: winEnv(env) });
+    const start = (source, env) => runIn('guard-fresh-session-start.js',
+        { hook_event_name: 'SessionStart', source }, { env: winEnv(env) });
+    const injected = (r) => (r.stdout && r.stdout.includes('additionalContext') ? JSON.parse(r.stdout).hookSpecificOutput.additionalContext : '');
+    const hot = ctxAt('ups-hot', 190000);
+
+    // NEVER exit 2 on UserPromptSubmit: that erases the user's prompt and shows the reason to the
+    // user only - the run would be lost and the model would never learn why.
+    const slash = ups('<command-name>/project-quality-loop</command-name>\nrun it', hot);
+    assert.equal(slash.status, 0, 'the slash route never denies');
+    assert.match(injected(slash), /Do NOT start the run yet/, '... it injects the ask instead');
+    assert.match(injected(ups('/project-agent-capabilities', hot)), /Do NOT start the run yet/, 'a hand-typed slash is the same intent');
+    assert.match(injected(ups('<command-name>/claude-stack:update</command-name>', hot)), /Do NOT start the run yet/, 'the guided plugin walks are orchestration too');
+    assert.equal(injected(ups('<command-name>/project-quality-loop</command-name>', ctxAt('ups-cold', 40000))), '', 'a cold session is left alone');
+    assert.equal(injected(ups('fix the failing test', hot)), '', 'an ordinary prompt is never touched');
+    assert.equal(injected(ups('/help', hot)), '', 'a slash that is not an orchestration run passes');
+    assert.equal(injected(ups('/project-quality-loop', hot, { CLAUDE_STACK_FRESH_SESSION_PCT: '0' })), '', '0 disables this route too');
+
+    // SessionStart measures nothing - the transcript has just been replaced by its summary - so the
+    // compaction event itself is the evidence.
+    assert.match(injected(start('compact')), /just AUTO-COMPACTED/, 'a compaction carries the offer');
+    assert.equal(injected(start('startup')), '', 'an ordinary session start does not');
+    assert.equal(injected(start('compact', { CLAUDE_STACK_FRESH_SESSION_PCT: '0' })), '', 'and 0 disables it');
+
+    // the Skill route is unchanged, and the widened list reaches the review seats
+    assert.equal(askLoop(hot, winEnv()), 2, 'the Skill route still BLOCKS');
+    assert.equal(runIn('guard-fresh-session-start.js',
+        { tool_name: 'Skill', tool_input: { skill: 'project-verify-code' }, transcript_path: hot }, { env: winEnv() }).status, 2,
+        'project-verify-code is orchestration - measured starting at 364.6k ctx');
+});
+
 test('fresh-session window: the account settings model id names the tier before any usage proves it', () => {
     // The ONE readable source that keeps the window suffix (the transcript records `claude-opus-5`
     // with the [1m] stripped). 190k is past the 150k floor on the 200k tier and nowhere near 40%
@@ -751,19 +852,21 @@ test('fresh-session window: CLAUDE_STACK_CONTEXT_WINDOW is the user\'s own state
 test('fresh-session window: a percentage below 76 is not inert on a declared 1M window', () => {
     // The report: raising the percentage to 40 changed nothing, because 200k x anything up to 75%
     // is still under the 150k floor. On a known 1M window the percentage IS the setting.
-    const at300 = ctxAt('win-pct-300k', 300000);
+    const at160 = ctxAt('win-pct-160k', 160000);
     const env = (pct) => winEnv({ CLAUDE_STACK_CONTEXT_WINDOW: '1000000', CLAUDE_STACK_FRESH_SESSION_PCT: pct });
-    assert.equal(askLoop(at300, env('40')), 0, '300k is under 40% of 1M');
-    assert.equal(askLoop(at300, env('20')), 2, '... and past 20% of it');
-    assert.equal(askLoop(at300, env('0')), 0, '0 still disables the gate outright');
+    assert.equal(askLoop(at160, env('40')), 0, '160k is under the trigger a declared 1M window gives it');
+    assert.equal(askLoop(at160, env('15')), 2, '... and past 15% of it');
+    assert.equal(askLoop(at160, env('0')), 0, '0 still disables the gate outright');
+    // and the 250k ceiling caps what any percentage can ask for
+    assert.equal(askLoop(ctxAt('win-pct-300k', 300000), env('60')), 2, '60% of 1M is 600k, but the trigger is capped at 250k');
 });
 
 test('fresh-session window: a proven 1M tier is latched, so it survives the proof scrolling out', () => {
     // maxCtxSeen reads a 512KB TAIL: a long session's early 200k crossing scrolls out of it, and
     // the tier regressed from 400k back to 150k mid-session.
     const env = winEnv();
-    const tp = ctxAt('win-latch', 300000);
-    assert.equal(askLoop(tp, env), 0, '300k proves the 1M tier and is under 40% of it');
+    const tp = ctxAt('win-latch', 220000);
+    assert.equal(askLoop(tp, env), 0, '220k proves the 1M tier and is under its 250k trigger');
     fs.writeFileSync(tp, JSON.stringify(assistantRow('later', 'ok', { cache_read_input_tokens: 190000 })) + '\n');
     assert.equal(askLoop(tp, env), 0, 'the same session at 190k keeps the 1M tier');
     assert.equal(askLoop(tp, winEnv()), 2, 'a different session with no latch reads the 200k tier');
@@ -777,7 +880,7 @@ test('stop contract: the fresh-session offer reads the window the same three way
     const hot = at('stopwin-190k', 190000);
 
     assert.equal(stop(hot, winEnv()), 2, '190k with nothing declared: the 200k tier and its 150k floor');
-    assert.equal(stop(hot, winEnv({ CLAUDE_CONFIG_DIR: accountDir('stop-acct-1m', 'opus[1m]') })), 0, 'a 1M model id lifts it to 400k');
+    assert.equal(stop(hot, winEnv({ CLAUDE_CONFIG_DIR: accountDir('stop-acct-1m', 'opus[1m]') })), 0, 'a 1M model id lifts it past 190k');
     assert.equal(stop(hot, winEnv({ CLAUDE_STACK_CONTEXT_WINDOW: '1000000' })), 0, 'so does the declared window');
     assert.equal(stop(at('stopwin-450k', 450000), winEnv({ CLAUDE_STACK_CONTEXT_WINDOW: '1000000' })), 2, 'and 450k is past 40% of it');
 });

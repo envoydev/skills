@@ -58,7 +58,10 @@ if (!payload || typeof payload !== 'object') process.exit(0); // a JSON scalar/n
         const fs = require('fs');
         const path = require('path');
         const root = process.env.CLAUDE_PROJECT_DIR || payload.cwd || process.cwd();
-        const dir = path.join(root, docsRootEnv(), 'hook-blocks');
+        // resolve, NOT join: an ABSOLUTE CLAUDE_STACK_DOCS_PATH makes path.join('/a/b','/x/y')
+        // '/a/b/x/y', so every ledger row landed in a doubled path that nothing reads (measured
+        // across all ten guards). resolve honours an absolute value and still joins a relative one.
+        const dir = path.resolve(root, docsRootEnv(), 'hook-blocks');
         fs.mkdirSync(dir, { recursive: true });
         fs.appendFileSync(path.join(dir, `${payload.session_id || 'nosession'}.jsonl`), JSON.stringify({
           ts: new Date().toISOString(),
@@ -195,7 +198,7 @@ function block(what, target) {
     `not applied here, because a change landing there skips that repo's tests, conventions,\n` +
     `review and release, and its own project never sees it.\n\n` +
     `Write a task card instead, inside THIS project:\n` +
-    `  ${path.join(docsRoot, 'cross-project-tasks', '<other-project>.md')}\n` +
+    `  ${path.join(docsRoot.replace(/^\//, ''), 'cross-project-tasks', '<other-project>.md')}\n` +
     `naming the target repo and, per task: what must change and where (file + symbol, from your\n` +
     `investigation), why this project needs it, the contract both sides must agree on, and how\n` +
     `the other side can verify it. Then finish YOUR side against the current behaviour of\n` +
@@ -223,7 +226,8 @@ if (tool !== 'Bash') process.exit(0);
 // matching it blocks a document write for its own prose. Blank the body, keep the length. The
 // heredoc's own first line stays: `cat <<'EOF' > ../other/f.txt` carries its redirect THERE, and
 // blanking the whole match let that classic shell write through (reproduced).
-const command = String(input.command || '').replace(
+const rawCommand = String(input.command || '');
+const command = rawCommand.replace(
   /<<-?\s*(['"]?)([A-Za-z_][A-Za-z0-9_]*)\1[\s\S]*?^\s*\2\s*$/gm,
   (m) => { const nl = m.indexOf('\n'); return nl === -1 ? m : m.slice(0, nl) + m.slice(nl).replace(/[^\n]/g, ' '); },
 );
@@ -319,6 +323,68 @@ for (const { re, what, all } of WRITE_PATTERNS) {
     else judge(unquote(m[1]), m.index, what);
   }
 }
+// An INTERPRETER with an inline script is a write route the loop above CANNOT see, and the
+// reason is structural: a script body is always inside quotes (`node -e "…"`), which `inQuotes`
+// skips as prose, or inside a heredoc, whose body is blanked as data before the loop runs. So it
+// is judged HERE, on the raw text, the way GIT_BARE is judged separately below. Measured as a
+// blocked/allowed PAIR on one operation five seconds apart in the same session - the shell
+// `rm -f "$B"/*/x` denied, the identical unlink through `python3 - <<'PY' … f.unlink()` allowed -
+// and under a Bash-first harness the heredoc IS the write route (23 of 23 writes in one bundle,
+// 17 sibling mutations in another). Mirrors guard-read-whole-file.js's `runtimeDump`.
+// Only a body actually FED to an interpreter is read: a heredoc going to `cat > plan.md` stays
+// inert prose, which is what keeps a document write from blocking on its own text. And only a
+// LITERAL path is judged - an interpolated or computed one is left alone for the same reason an
+// unexpanded shell variable is never judged anywhere else in this guard. Heredoc blanking keeps
+// the command's LENGTH, so an index into the raw text still anchors correctly through `anchorAt`.
+const INTERP = String.raw`(?:python[\d.]*|node|nodejs|ruby|perl|php|deno|bun|osascript|pwsh|powershell)`;
+const scripts = [];
+{
+  const HEREDOC = /<<-?\s*(['"]?)([A-Za-z_][A-Za-z0-9_]*)\1([\s\S]*?)^\s*\2\s*$/gm;
+  const isInterp = new RegExp(`\\b${INTERP}\\b`);
+  let h;
+  while ((h = HEREDOC.exec(rawCommand)) !== null) {
+    const header = rawCommand.slice(rawCommand.lastIndexOf('\n', h.index) + 1, h.index);
+    if (isInterp.test(header)) scripts.push({ body: h[3], index: h.index });
+  }
+  // `node -e "…"` / `python3 -c '…'` - the same script, spelled as one argument
+  const INLINE = new RegExp(`\\b${INTERP}\\b[^\\n;|&]*?\\s-(?:e|c|-eval|-command)\\s+("[\\s\\S]*?"|'[\\s\\S]*?')`, 'g');
+  let e;
+  while ((e = INLINE.exec(rawCommand)) !== null) scripts.push({ body: e[1].slice(1, -1), index: e.index });
+}
+if (scripts.length) {
+  const LIT = String.raw`(["'])([^"'\n]+)\1`;
+  const DESTRUCTIVE = 'write_text|write_bytes|unlink|mkdir|rmdir|rename|replace|touch|chmod';
+  const WRITE_CALLS = [
+    // a write verb whose FIRST argument is the path
+    new RegExp(String.raw`\b(?:writeFileSync|appendFileSync|createWriteStream|writeFile|appendFile|unlinkSync|unlink|rmSync|rmdirSync|rmdir|mkdirSync|mkdir|makedirs|removedirs|renameSync|rename|copyFileSync|copyfile|copy2|truncateSync|truncate|chmodSync|chmod|remove|rmtree|move|touch)\s*\(\s*${LIT}`, 'g'),
+    // `open(path, 'w')` - a bare `open(path)` is a READ, and reading another repo stays open
+    new RegExp(String.raw`\b(?:open|fopen)\s*\(\s*${LIT}\s*,\s*["'][^"']*[wax+][^"']*["']`, 'g'),
+    // pathlib, chained: `Path('…').write_text(…)`
+    new RegExp(String.raw`\bPath\s*\(\s*${LIT}\s*\)\s*\.\s*(?:${DESTRUCTIVE})\b`, 'g'),
+  ];
+  // `f = Path('…')` … `f.unlink()` - the measured shape: the literal and the destructive call are
+  // statements apart, so the binding is followed by NAME. Pairing them is what keeps a script that
+  // READS another repo and writes in-project from blocking.
+  // spelled out rather than reusing LIT: the leading capture shifts LIT's own backreference
+  const PATH_BIND = /(\w+)\s*=\s*(?:pathlib\.)?Path\s*\(\s*(["'])([^"'\n]+)\2/g;
+  const judgeLiteral = (raw, index) => {
+    if (/[${]/.test(raw)) return; // interpolated - the path is computed, don't guess
+    judge(raw, index, 'an interpreter write');
+  };
+  for (const { body, index } of scripts) {
+    for (const re of WRITE_CALLS) {
+      re.lastIndex = 0;
+      let m;
+      while ((m = re.exec(body)) !== null) judgeLiteral(m[2], index);
+    }
+    PATH_BIND.lastIndex = 0;
+    let b;
+    while ((b = PATH_BIND.exec(body)) !== null) {
+      if (new RegExp(String.raw`\b${b[1]}\s*\.\s*(?:${DESTRUCTIVE})\b`).test(body)) judgeLiteral(b[3], index);
+    }
+  }
+}
+
 // A bare `git <mutating>` after a `cd` out of tree writes THAT checkout - the same event as
 // `git -C <dir>`, spelled the way a session actually spells it (reproduced: passed).
 const GIT_BARE = new RegExp(`\\bgit\\s+(?:-c\\s+\\S+\\s+|--\\S+\\s+)*(?:${GIT_MUTATING})(?![\\w-])`, 'g');

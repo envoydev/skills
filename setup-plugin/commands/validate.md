@@ -174,7 +174,9 @@ The one layer that is not an artifact: the values this stack owns in the scope's
 `env`. Read the rows from the snapshot's `$TMP/repo/meta/environment.json` and the current block
 from the file (project mode: `.claude/settings.json`; global: the account file), then show one
 table of the actionable rows only - an install whose env already matches gets the single line
-`environment: nothing to reconcile` and you move on:
+`environment: nothing to reconcile` and you move on. **Never print, echo back, or ask for a credential VALUE.** A key matching the catalog's `secret_key_pattern`, or a row flagged `secret: true`, is reported as `set (N chars)` or `absent` and nothing else - not as a shown default, not in a table, not in a question. A value that must be set is set by the user in the file itself, or with a copy-ready command they run in their own terminal; it never travels through the chat. Measured: seven credential exposures in one corpus.
+
+
 
 - **MISSING** - a catalog row with no key in the file. This is the release-introduced case: a
   variable added upstream after this install was made, which no artifact diff can surface because

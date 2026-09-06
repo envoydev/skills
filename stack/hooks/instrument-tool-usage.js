@@ -64,7 +64,7 @@ const docsRootEnv = () => process.env.CLAUDE_STACK_DOCS_PATH || process.env.CLAU
     const docsRoot = docsRootEnv();
     const out =
       process.env.CLAUDE_STACK_INSTRUMENT_LOG ||
-      path.join(dir, docsRoot, 'tools-usage', `${sid}.jsonl`);
+      path.resolve(dir, docsRoot, 'tools-usage', `${sid}.jsonl`);
     fs.mkdirSync(path.dirname(out), { recursive: true });
     fs.appendFileSync(out, JSON.stringify(rec) + '\n');
   } catch {
