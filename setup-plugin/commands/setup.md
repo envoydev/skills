@@ -184,6 +184,11 @@ were ignored. So after the card, put the steps the user must decide or run NOW -
 reload, the gitignore write, the account-file credential line, a manual-only capture skill -
 through AskUserQuestion as the turn's last act, one option per step plus 'nothing now'. Purely
 informational steps stay in the card and end nothing.
+Recommendation FIRST, in the question text itself: name the step and the one reason it
+matters ('Re-run `/project-agent-capabilities`? The update refreshed 12 skill files, so the
+generated rule's stamped sentences are stale'), never a contentless 'What now?' over a list.
+The report already did the deciding; the ask only collects consent, so the recommended option
+comes first and says it is recommended.
 
 Report what still needs a hand: LSP tools (`csharp-ls` via `dotnet tool install -g csharp-ls` on a .NET setup), the `/claude-hud:setup` statusline step, and that the first `claude plugin install` may prompt to trust. Then, AFTER the summary, print the next-steps card - built from what THIS run actually installed, never naming a command whose skill is absent. The card opens with the one step everything else depends on - reload the session (MCPs connect and skills/agents/rules inject at launch; nothing installed this run is live until then) - and closes by naming `${CLAUDE_PLUGIN_ROOT}/references/post-install.md` as the durable copy the user can re-read later (it adds the serena setup prompt and the gitignore semantics):
 
