@@ -150,7 +150,12 @@ the first cycle's reviewer).
    call decided against the codebase's precedent - and the plan's `## Decisions` ledger grows as
    they land: appended directly in session mode, folded in from each seat's `decisions:` report
    lines as its report lands in agents mode. A mid-build how-to-build question is a protocol
-   violation; the only build-time stop is scope beyond the plan.
+   violation. Build-time stops are for what the BUILD cannot decide, and there are three: scope
+   beyond the plan, a decision the plan left open that the code now forces, and an EXTERNAL
+   blocker the run cannot resolve (a service or test dependency down, a credential missing, a
+   locked file). The old single-stop wording classified correct behaviour as a violation - a run
+   that stopped because an external test dependency was down was reading the rule right and doing
+   the wrong thing. State the blocker, say what is done and what is not, and stop.
    *Stop* - and this stop chooses the reviewer for step 5, through the same decision mechanism:
    'project-verify-code in-session' - no dispatch, stays in this context; 'the
    stack's `<stack>-verifier` seat' - isolated eyes, frontmatter model unless the user names one;

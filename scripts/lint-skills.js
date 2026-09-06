@@ -366,6 +366,23 @@ function lintJudgmentCatalog(catalog, rosters)
 // cross-mentions). Every copy is pinned by a marker phrase from that file's own wording,
 // matched whitespace-normalized so md line wrapping cannot break it. A copy edited or deleted
 // breaks its marker -> the finding lists every other copy, forcing the sync mechanically.
+// 29. Every DELIBERATE-ONLY skill must be in guard-fresh-session-start.js's ORCHESTRATION list.
+// `disable-model-invocation: true` is the skill saying it only ever starts because a person asked
+// for it - which is exactly the run that must not start on another finished run's carried history.
+// The list was hand-maintained and drifted: four such runs were missing from the live regex, so the
+// fresh-session offer never fired for them. Generated from the roster instead of trusted.
+function lintOrchestrationRoster(deliberateSkills, hookSrc)
+{
+    const m = /^const ORCHESTRATION = (\/.*\/);$/m.exec(hookSrc);
+    if (!m) return ['guard-fresh-session-start.js: no `const ORCHESTRATION = /.../;` line to check the roster against'];
+    let re;
+    try { re = new RegExp(m[1].slice(1, m[1].lastIndexOf('/'))); }
+    catch (err) { return [`guard-fresh-session-start.js: ORCHESTRATION is not a usable regex (${err.message})`]; }
+    return deliberateSkills
+        .filter((name) => !re.test(name))
+        .map((name) => `${name} declares disable-model-invocation but is absent from guard-fresh-session-start.js's ORCHESTRATION list - the fresh-session offer will never fire for it`);
+}
+
 // 28. The plugin-settings catalog (meta/plugin-settings.json) - the same silent-miss class as
 // evidence.json, one layer out: a row for a plugin the stack does not install is never offered,
 // and a key the plugin does not read is a no-op the user still gets asked about. The version the
@@ -1472,6 +1489,19 @@ function main()
             flag(`meta/plugin-settings.json is unreadable: ${err.message}`);
         }
 
+        // 29. The deliberate-only roster vs the fresh-session hook's ORCHESTRATION list.
+        try
+        {
+            const deliberate = localSkillDirs()
+                .filter((d) => /^\s*disable-model-invocation:\s*true\s*$/m.test(fs.readFileSync(path.join(SKILLS_DIR, d, 'SKILL.md'), 'utf8')));
+            const hookSrc = fs.readFileSync(path.join(ROOT, 'stack', 'hooks', 'guard-fresh-session-start.js'), 'utf8');
+            for (const finding of lintOrchestrationRoster(deliberate, hookSrc)) flag(finding);
+        }
+        catch (err)
+        {
+            flag(`the deliberate-only roster check could not run: ${err.message}`);
+        }
+
         // 23. The judgment catalog (meta/judgment.json) - same silent-miss
         //     class: refs must resolve, overlaps carry both gaps, thresholds parse.
         const judgmentPath = path.join(ROOT, 'meta', 'judgment.json');
@@ -1722,6 +1752,7 @@ module.exports = {
     localSkillDirs,
     lintEvidenceCatalog,
     lintPluginSettings,
+    lintOrchestrationRoster,
     lintJudgmentCatalog,
     lintEnvironmentCatalog,
     lintSharedRules,

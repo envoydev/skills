@@ -1424,6 +1424,13 @@ RETIRED_SKILLS=(project-task-flow project-task-cycle project-capabilities projec
 RETIRED_RULES=(baseline-agents-skills.md baseline-code-quality.md baseline-communication.md baseline-definition-of-done.md baseline-evaluating-proposals.md baseline-mcp-tools.md baseline-planning.md baseline-related-projects.md house-baseline.md web-conventions.md aspnet-conventions.md)
 RETIRED_HOOKS=(require-convention-skill.js inject-code-style.js)
 RETIRED_AGENTS=(angular-solution-designer.md angular-implementer.md angular-verifier.md mobile-solution-designer.md mobile-implementer.md mobile-verifier.md dotnet-windows-service-solution-designer.md dotnet-windows-service-implementer.md dotnet-windows-service-verifier.md code-analyzer.md issue-diagnoser.md)
+# MCP servers this stack no longer ships AT ALL. Empty today, and it is the mechanism that matters:
+# skills, agents, rules and hooks each got a retired list; MCPs never did, so a server the stack
+# dropped stayed registered in every existing install and kept injecting its tool schemas on every
+# session (measured: 24 playwright schemas re-injected into a headless backend project). A server
+# the stack still SHIPS but this project no longer needs is a different question - that is
+# /claude-stack:validate's whole-stack-absent pass, not a retirement.
+RETIRED_MCPS=()
 
 remove_skills() {  # rm -rf each manifest skill under the scope dest, so update starts from a clean slate
   local dest entry name
@@ -1484,8 +1491,17 @@ update_plugins() {
   done
 }
 
+prune_retired_mcps() {  # UPDATE: unregister the known retired server names (RETIRED_MCPS above)
+  local name
+  for name in ${RETIRED_MCPS[@]+"${RETIRED_MCPS[@]}"}; do
+    claude mcp remove "$name" -s "$CLAUDE_SCOPE" >/dev/null 2>&1 && log "  mcp pruned (retired upstream): $name"
+  done
+  return 0
+}
+
 update_mcps() {
   command -v claude >/dev/null 2>&1 || { CLAUDE_MISSING=true; return 0; }   # fail-soft: skip, never abort the run
+  prune_retired_mcps
   # Only the @latest entries (chrome-devtools, appium-mcp) float at launch; the pinned ones (playwright,
   # serena, memory, context7 when local) bump here via remove + re-add. angular-cli stays unpinned by
   # design; the hosted servers (context7 remote, sentry) have nothing to pin.

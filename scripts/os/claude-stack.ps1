@@ -1593,6 +1593,13 @@ $RetiredSkills = @('project-task-flow', 'project-task-cycle', 'project-capabilit
 $RetiredRules = @('baseline-agents-skills.md', 'baseline-code-quality.md', 'baseline-communication.md', 'baseline-definition-of-done.md', 'baseline-evaluating-proposals.md', 'baseline-mcp-tools.md', 'baseline-planning.md', 'baseline-related-projects.md', 'house-baseline.md', 'web-conventions.md', 'aspnet-conventions.md')
 $RetiredHooks = @('require-convention-skill.js', 'inject-code-style.js')
 $RetiredAgents = @('angular-solution-designer.md', 'angular-implementer.md', 'angular-verifier.md', 'mobile-solution-designer.md', 'mobile-implementer.md', 'mobile-verifier.md', 'dotnet-windows-service-solution-designer.md', 'dotnet-windows-service-implementer.md', 'dotnet-windows-service-verifier.md', 'code-analyzer.md', 'issue-diagnoser.md')
+# MCP servers this stack no longer ships AT ALL. Empty today, and it is the mechanism that matters:
+# skills, agents, rules and hooks each got a retired list; MCPs never did, so a server the stack
+# dropped stayed registered in every existing install and kept injecting its tool schemas on every
+# session (measured: 24 playwright schemas re-injected into a headless backend project). A server
+# the stack still SHIPS but this project no longer needs is a different question - that is
+# /claude-stack:validate's whole-stack-absent pass, not a retirement.
+$RetiredMcps = @()
 
 function Remove-Skills {
   # rm the manifest skills under the scope dest, so update starts from a clean slate.
@@ -1659,8 +1666,17 @@ function Update-Plugins {
   }
 }
 
+function Remove-RetiredMcps {
+  # UPDATE: unregister the known retired server names ($RetiredMcps above)
+  foreach ($name in $RetiredMcps) {
+    claude mcp remove $name -s $script:ClaudeScope 2>$null | Out-Null
+    if ($LASTEXITCODE -eq 0) { Write-Log "  mcp pruned (retired upstream): $name" }
+  }
+}
+
 function Update-Mcps {
   if (-not (Get-Command claude -ErrorAction SilentlyContinue)) { $script:ClaudeMissing = $true; return }   # fail-soft: skip, never abort
+  Remove-RetiredMcps
   # Only the @latest entries (chrome-devtools, appium-mcp) float at launch; the pinned ones (playwright,
   # serena, memory, context7 when local) bump here via remove + re-add. angular-cli stays unpinned by
   # design; the hosted servers (context7 remote, sentry) have nothing to pin.
