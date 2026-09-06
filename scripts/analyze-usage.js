@@ -102,6 +102,34 @@ function docRelPath(filePath) {
 
 // ---------- transcript analysis (main session or one subagent) ----------
 
+// ---------- one quoted-span-and-heredoc discipline, four consumers ----------
+// The same root defect appeared in the commit guard, the publish guard, this script's commit
+// counter and this script's doc matcher: a literal sitting inside PROSE - a heredoc body, a quoted
+// string - read as an invocation. Here it manufactured `git commits 12` for a session that made
+// ZERO, and phantom `flow/COMMIT-GATE` writes, which is the exact fact a protocol check turns on
+// (patched replay of the doc table: 61 rows -> 24).
+//
+// A heredoc body is DATA when it goes to `cat > file` and CODE when it is fed to an interpreter,
+// so only the first kind is masked - blanking both would erase the python doc writes that reach a
+// file from inside a heredoc, which is how this script sees batched doc I/O at all.
+const INTERP_RE = /\b(?:python[\d.]*|node|nodejs|ruby|perl|php|deno|bun|osascript|pwsh|powershell)\b/;
+function maskHeredocs(cmd) {
+  return String(cmd).replace(
+    /<<-?\s*(['"]?)([A-Za-z_][A-Za-z0-9_]*)\1[\s\S]*?^\s*\2\s*$/gm,
+    (m, _q, _tag, off, whole) => {
+      const header = whole.slice(whole.lastIndexOf('\n', off) + 1, off);
+      if (INTERP_RE.test(header)) return m;               // an inline script - real code
+      const nl = m.indexOf('\n');
+      return nl === -1 ? m : m.slice(0, nl) + m.slice(nl).replace(/[^\n]/g, ' ');
+    },
+  );
+}
+// Length-preserving and NON-space, so a masked span stays one opaque argument token rather than
+// dissolving the command around it (that is what un-gated `git -C "<dir>" commit` in the guard).
+const maskQuoted = (cmd) => String(cmd)
+  .replace(/'[^'\n]*'/g, (m) => m.replace(/[^\n]/g, 'x'))
+  .replace(/"[^"\n]*"/g, (m) => m.replace(/[^\n]/g, 'x'));
+
 async function analyzeTranscript(file, window) {
   const s = {
     file,
@@ -117,6 +145,15 @@ async function analyzeTranscript(file, window) {
     styleInjections: 0,          // legacy inject-code-style hook firings seen in this transcript
     userPrompts: 0,
     compactions: 0,
+    compactionEvents: [],        // { ts, pre, post, dropped, durationMs } - one row per compaction
+    stopHookBlocks: 0,           // Stop-hook denials: an isMeta user STRING, invisible to is_error
+    denialsByHook: {},           // hook file name (or '(unattributed)') -> denials attributed to it
+    peakCtx: 0,                  // largest per-message context carried, and where
+    peakCtxAt: null,
+    floorCtx: 0,                 // smallest per-message context = the standing inventory
+    modelIdsFull: [],            // model ids WITH their window suffix, from cost-state
+    totalCostUSD: null,
+    thinkingTokens: 0,           // from cost-state.modelUsage - unattributable to any one message
     commandInvocations: {},      // slash-command name -> count (from <command-name> markers)
     apiErrors: 0,
     apiErrorEvents: [],          // { ts, ctx } - the context level each API error fired at
@@ -133,6 +170,18 @@ async function analyzeTranscript(file, window) {
   const toolById = new Map();
   // doc writes seen in a Bash command, tallied only once the result shows it executed
   const pendingDocTouch = new Map();     // tool_use id -> { name, skill }
+  const pendingGitActs = new Map();      // tool_use id -> { commits, merges } - released on a non-error result
+  const promptParents = new Set();       // parentUuid of a counted user turn - siblings are the same turn
+  // The ["…/hooks/<file>.js"] bracket is an ATTRIBUTION signal, never the test for a denial: the
+  // JSON permission-decision route carries no bracket at all. An unattributable denial still counts,
+  // it just lands in its own bucket - the transcript alone records which TOOL was denied, never
+  // which hook, and that is the whole reason the hook-block ledger exists.
+  const attributeDenial = (text) => {
+    const m = /\["?[^"\]]*\/hooks\/([A-Za-z0-9._-]+\.js)"?\]/.exec(text);
+    const key = m ? m[1] : '(unattributed)';
+    s.denialsByHook = s.denialsByHook || {};
+    s.denialsByHook[key] = (s.denialsByHook[key] || 0) + 1;
+  };
   let prevCtx = null;
   let pending = [];               // tool results since the previous counted assistant msg
   // One real compaction emits TWO lines (a system compactMetadata + a user isCompactSummary,
@@ -167,11 +216,52 @@ async function analyzeTranscript(file, window) {
       const ts = Date.parse(o.timestamp);
       if ((window.from != null && ts < window.from) || (window.to != null && ts > window.to)) return;
     }
+    // An ATTACHMENT is context the session paid for and the accumulator never saw: the largest
+    // spike in one bundle printed as '(prompt/attachment only)' with no cause at all, because
+    // attachment records never entered `pending`. A file the session itself edited comes back as
+    // an attachment too (`edited_text_file`), which an install RUN generates by the dozen.
+    if (o.type === 'user' && Array.isArray(o.attachments)) {
+      for (const at of o.attachments) {
+        const body = typeof at === 'string' ? at : JSON.stringify(at || '');
+        pending.push({ name: `attachment:${(at && at.type) || 'text'}`, chars: body.length });
+      }
+    }
     if (raw.includes(STYLE_RULE_MARKER)) s.styleRuleAttaches++;
     if (raw.includes(STYLE_INJECT_MARKER)) s.styleInjections++;
     if (o.timestamp) { if (!s.firstTs) s.firstTs = o.timestamp; s.lastTs = o.timestamp; }
     if (!s.ccVersion && o.version) s.ccVersion = o.version;
-    if (o.compactMetadata) { compactMeta++; if (lastSkill) s.skillTimeline.push({ ts: o.timestamp || null, skill: null }); lastSkill = null; }
+    // `cost-state` is a record in this same file, and it is the ONLY place two facts survive:
+    // the THINKING tokens (billed, attributable to no single message - 86,346 in one session, with
+    // all 116 thinking blocks empty, so spike residuals could never be closed), and the model id
+    // WITH its window suffix (`claude-opus-5[1m]`) - every assistant message strips it, and the
+    // fresh-session threshold is chosen by exactly that suffix.
+    if (o.type === 'cost-state' && o.modelUsage) {
+      // the record is CUMULATIVE and written more than once per session - take the largest,
+      // so a resume that restarts the counter cannot shrink the total
+      const think = Object.values(o.modelUsage).reduce((n, v) => n + ((v && v.thinkingTokens) || 0), 0);
+      if (think > s.thinkingTokens) s.thinkingTokens = think;
+      for (const id of Object.keys(o.modelUsage)) if (!s.modelIdsFull.includes(id)) s.modelIdsFull.push(id);
+      if (o.totalCostUSD != null && (s.totalCostUSD == null || o.totalCostUSD > s.totalCostUSD)) s.totalCostUSD = o.totalCostUSD;
+    }
+    if (o.compactMetadata) {
+      compactMeta++;
+      // The metadata was read and only a COUNT was printed - 738,247 dropped tokens and 4m02s of
+      // wall clock discarded across one session's compactions, the single largest unexplained
+      // number in several reports.
+      const cm = o.compactMetadata;
+      const pre = cm.preTokens ?? cm.preCompactTokens ?? null;
+      const post = cm.postTokens ?? cm.postCompactTokens ?? null;
+      s.compactionEvents.push({
+        ts: o.timestamp || null,
+        pre,
+        post,
+        dropped: pre != null && post != null ? pre - post : null,
+        durationMs: cm.durationMs ?? cm.duration ?? null,
+        trigger: cm.trigger || null,
+      });
+      if (lastSkill) s.skillTimeline.push({ ts: o.timestamp || null, skill: null });
+      lastSkill = null;
+    }
     if (o.isCompactSummary) compactSummary++;
     // Record the context level each API error fired at - reports guessed at causes when
     // errors clustered at high ctx (measured: 22 errors at ~200k ctx read as flakiness).
@@ -183,7 +273,10 @@ async function analyzeTranscript(file, window) {
     if (o.type === 'user' && o.message && raw.includes('<command-name>')) {
       const own = typeof o.message.content === 'string' ? o.message.content
         : Array.isArray(o.message.content) ? o.message.content.filter((c) => c.type === 'text').map((c) => c.text || '').join('\n') : '';
-      for (const m of own.matchAll(/<command-name>\/?([A-Za-z0-9_:-]+)<\/command-name>/g)) {
+      // A LEADING SPACE inside the tag suppressed the match, and a whole guided-command run then
+      // charged its ~2.75M to the previous command's window instead of appearing in the SKILLS
+      // table at all.
+      for (const m of own.matchAll(/<command-name>\s*\/?\s*([A-Za-z0-9_:-]+)\s*<\/command-name>/g)) {
         s.commandInvocations[m[1]] = (s.commandInvocations[m[1]] || 0) + 1;
         if (lastSkill) s.skillTimeline.push({ ts: o.timestamp || null, skill: null });
         lastSkill = null; // a new slash command ends the previous skill's carry-forward
@@ -218,11 +311,31 @@ async function analyzeTranscript(file, window) {
           if (activeInvoke) activeInvoke.msgs += 1;
           // context size is fixed at message start, so first sighting is exact for spikes
           const ctx = (m.usage.input_tokens || 0) + (m.usage.cache_read_input_tokens || 0) + (m.usage.cache_creation_input_tokens || 0);
+          // PEAK context, not just the last one: every threshold in the stack keys off the largest
+          // per-message context a session carried, and reports that quoted the final message
+          // understated it by 17-43% (10 confirmations).
+          if (ctx > s.peakCtx) { s.peakCtx = ctx; s.peakCtxAt = o.timestamp || null; }
+          // The COLD FLOOR: the smallest context any message carried is the standing inventory -
+          // system prompt, tool schemas, CLAUDE.md, the always-on rules - paid on every single
+          // message and re-paid in full after every compaction. Measured at 3.7%-86.8% of a
+          // session's cache-read and 23-48% of its own floor, and no report had a row for it.
+          if (ctx > 0 && (s.floorCtx === 0 || ctx < s.floorCtx)) s.floorCtx = ctx;
           if (prevCtx != null && ctx - prevCtx > 0) {
             s.spikes.push({ ts: o.timestamp, delta: ctx - prevCtx, ctx, causes: summarizeCauses(pending) });
-            s.spikes.sort((a, b) => b.delta - a.delta);
-            if (s.spikes.length > 5) s.spikes.pop();
+          } else if (prevCtx != null && (m.usage.cache_creation_input_tokens || 0) > 20000) {
+            // Right after a compaction the context DROPS, so a re-cache of the rebuilt prompt has a
+            // negative delta and never entered the accumulator - 279,885 tokens, 17.2% of one
+            // session's whole cache-write, invisible. Keyed on the write itself, not the delta.
+            s.spikes.push({
+              ts: o.timestamp,
+              delta: m.usage.cache_creation_input_tokens || 0,
+              ctx,
+              kind: 'cache-write',
+              causes: summarizeCauses(pending) || 'prompt re-cached after a context reset',
+            });
           }
+          s.spikes.sort((a, b) => b.delta - a.delta);
+          if (s.spikes.length > 5) s.spikes.length = 5;
           prevCtx = ctx; pending = [];
         }
         r.u.in = Math.max(r.u.in, m.usage.input_tokens || 0);
@@ -273,12 +386,15 @@ async function analyzeTranscript(file, window) {
           // A heredoc body is DATA: a plan file or receipt that merely describes `git commit`
           // is not an invocation. Counting it reported 13 commits where 8 ran, 4 where 1 ran,
           // and 4 where NONE ran (measured across 3 bundles) - blank the payload before counting.
-          const cmdShell = cmdStr.replace(
-            /<<-?\s*(['"]?)([A-Za-z_][A-Za-z0-9_]*)\1[\s\S]*?^\s*\2\s*$/gm,
-            (m2) => m2.replace(/[^\n]/g, ' '),
-          );
-          s.gitCommits += (cmdShell.match(/\bgit\s+(?:-[\w-]+(?:[= ]\S+)?\s+)*commit\b/g) || []).length;
-          s.prMerges += (cmdShell.match(/\bgh\s+pr\s+merge\b/g) || []).length;
+          const cmdShell = maskHeredocs(cmdStr);
+          // The COUNTERS need the quoted spans gone too, and the match has to OPEN a segment: every
+          // phantom commit in the corpus was a quoted string, one of them inside a command the
+          // harness had DENIED (worst case: 12 commits reported against 0 real). Held until the
+          // paired tool_result proves the call ran, the same way the doc touches are.
+          const cmdCode = maskQuoted(cmdShell);
+          const commits = (cmdCode.match(/(?:^|[;&|(]\s*)git\s+(?:-[\w-]+(?:[= ]\S+)?\s+)*commit\b/g) || []).length;
+          const merges = (cmdCode.match(/(?:^|[;&|(]\s*)gh\s+pr\s+merge\b/g) || []).length;
+          if (commits || merges) pendingGitActs.set(c.id, { commits, merges });
           // Doc traffic routed through Bash (heredocs, printf >, rm -f) is real doc I/O the
           // Write/Edit-only counter missed - a receipt written+cleared via Bash showed
           // writes:0, and batched python doc writes showed writes:0 across 3 rewrites (measured).
@@ -292,12 +408,18 @@ async function analyzeTranscript(file, window) {
             // counted, reporting 3 writes where 1 executed (measured). The result for this call
             // decides - an is_error result means nothing was written.
             const touched = new Map();
-            for (const seg of cmdStr.split(/&&|\|\||;|\n/)) {
+            for (const seg of cmdShell.split(/&&|\|\||;|\n/)) {
               for (const pm of seg.matchAll(/(?:^|[\s"'`=(])((?:[^\s"'`;|&)]*\/)?\.claude\/docs\/[^\s"'`;|&)]+)/g)) {
-                const p = pm[1];
+                const p = pm[1].replace(/[/:,.]+$/, ''); // a trailing separator is punctuation, not the name
                 if (p.includes('$')) continue; // unexpanded variable - not a literal doc path
+                if (/[*?\[]/.test(p)) continue; // a GLOB names no one document
                 const rel = p.slice(p.indexOf('.claude/docs/') + '.claude/docs/'.length);
-                if (!rel) continue;
+                // Only a DOCUMENT: keying on every token under the docs root produced 79 rows for
+                // ~6 real documents - directories, globs and trailing punctuation each got a row.
+                if (!rel || !/\.md$/i.test(rel)) continue;
+                // An ASSIGNMENT is neither a read nor a write; it was counted as a read in 35 of 72
+                // occurrences. Only the varWrite check below can turn a binding into a write.
+                const assigned = pm[0][0] === '=';
                 const esc = p.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
                 // A python write reaches the file three ways and only one names the path inside
                 // open(): `open("<path>","w")`, `p = "<path>" ... open(p,"w")`, and
@@ -310,9 +432,15 @@ async function analyzeTranscript(file, window) {
                 const varWrite = varBound
                   ? new RegExp(`open\\(\\s*${varBound[1]}\\s*,[^)]*["']w["']|\\b${varBound[1]}\\.write_(text|bytes)\\(|\\bio\\.open\\(\\s*${varBound[1]}\\s*,[^)]*["']w["']`).test(cmdStr)
                   : false;
-                const isWrite = varWrite || new RegExp(`(>>?\\s*["']?${esc})|(\\brm\\s+(?:-\\w+\\s+)*["']?${esc})|(\\btee\\s+(?:-a\\s+)?["']?${esc})|(open\\([^)]*${esc}[^)]*["']w["'])|(${esc}["'\`]?\\s*\\)?\\.write_(text|bytes)\\()`).test(seg);
-                const e = touched.get(rel) || { r: false, w: false };
-                if (isWrite) e.w = true; else e.r = true;
+                // `rm` CLEARS a receipt - counting it as a write reported a written document that
+                // was in fact deleted; and `mkdir -p <dir>` is neither read nor write of a document.
+                const cleared = new RegExp(`\\brm\\s+(?:-\\w+\\s+)*["']?${esc}`).test(seg);
+                const made = new RegExp(`\\bmkdir\\s+(?:-\\w+\\s+)*["']?${esc}`).test(seg);
+                const isWrite = varWrite || new RegExp(`(>>?\\s*["']?${esc})|(\\btee\\s+(?:-a\\s+)?["']?${esc})|(open\\([^)]*${esc}[^)]*["']w["'])|(${esc}["'\`]?\\s*\\)?\\.write_(text|bytes)\\()`).test(seg);
+                const e = touched.get(rel) || { r: false, w: false, c: false };
+                if (isWrite) e.w = true;
+                else if (cleared) e.c = true;
+                else if (!made && !assigned) e.r = true;
                 touched.set(rel, e);
               }
             }
@@ -335,10 +463,32 @@ async function analyzeTranscript(file, window) {
       // person typing: counting them inflated userPrompts and manufactured unheld-stop
       // candidates out of background-task completions (measured: a clean session reported
       // 1 candidate whose 'user turn' was a task-notification landing after the close).
-      const isInjectedText = (txt) => /^\s*<(task-notification|system-reminder|teammate-message|background-task)\b/.test(txt)
-        || (o.origin && o.origin.kind === 'task-notification');
+      // The harness's own UserPromptSubmit hook already implements the right discriminator, and it
+      // is a POSITIVE one: origin.kind === 'human'. Counting by exclusion list inflated the prompt
+      // count by up to 500% across 12 bundles - it missed <command-name>, <local-command-stdout>,
+      // isCompactSummary, and the sibling records one typed turn produces. The list stays as the
+      // fallback for a transcript generation that carries no origin.
+      const isInjectedText = (txt) => (o.origin
+        ? o.origin.kind !== 'human'
+        : /^\s*<(task-notification|system-reminder|teammate-message|background-task|command-message|command-args|local-command-stdout|local-command-stderr)\b/.test(txt))
+        || o.isCompactSummary === true;
+      // One typed turn can emit several user records sharing a parentUuid (the command marker, its
+      // message, its stdout). The first one counts; the rest are the same turn.
+      const firstOfTurn = () => {
+        if (!o.parentUuid) return true;
+        if (promptParents.has(o.parentUuid)) return false;
+        promptParents.add(o.parentUuid);
+        return true;
+      };
       if (typeof content === 'string') {
-        if (!o.isMeta && !isInjectedText(content)) {
+        // A Stop-hook denial arrives as an isMeta user STRING with no tool_result, so it is
+        // structurally invisible to the is_error path below: one report printed 'Hook blocks - 4'
+        // against 6 and then named both Stop blocks two paragraphs later.
+        if (/^\s*Stop hook feedback:/.test(content)) {
+          s.stopHookBlocks = (s.stopHookBlocks || 0) + 1;
+          attributeDenial(content);
+        }
+        if (!o.isMeta && !isInjectedText(content) && firstOfTurn()) {
           s.userPrompts++;
           if (prevAssistantNoTool) { s.unheldStopCandidates.push({ stopTs: prevAssistantNoTool, userTs: o.timestamp || null }); prevAssistantNoTool = null; }
         }
@@ -372,23 +522,41 @@ async function analyzeTranscript(file, window) {
         // A PreToolUse guard denial is the gate WORKING, not a tool failure - bucketing them
         // as errors made reports call a working gate 'the session's weak point' (measured in
         // three bundles: 124/132, 14/14 and 15/15 'Read errors' were all guard blocks).
-        // Match the whole guard family by its shared 'Blocked: ' prefix - enumerating two
-        // messages missed the commit/rm/force-push/sleep variants and split one session's
-        // denials into 22 'errors' + 12 blocks when all 34 were gate denials (measured).
-        const isHookBlock = c.is_error && /\bBlocked: /.test(text);
+        // Match the whole guard family by its shared 'Blocked' word - enumerating two messages
+        // missed the commit/rm/force-push/sleep variants and split one session's denials into 22
+        // 'errors' + 12 blocks when all 34 were gate denials (measured). The COLON is not part of
+        // the contract: two real denials read '... Blocked because no receipt. Do NOT retry this
+        // command yet.' and arrive by the JSON permission-decision route with no hooks bracket at
+        // all, so requiring either would newly hide a whole class of real blocks.
+        const isHookBlock = c.is_error && (/\bBlocked\b/.test(text) || /\bDo NOT retry\b/i.test(text));
+        if (isHookBlock) attributeDenial(text);
         const held = pendingDocTouch.get(c.tool_use_id);
         if (held) {
           pendingDocTouch.delete(c.tool_use_id);
           for (const [rel, e] of held) {
+            // An occurrence that classified as NOTHING - a bare `VAR=<path>` binding, a `mkdir` of
+            // its directory - must not open a row: an all-zero row is one of the 79 the report
+            // printed for ~6 real documents.
+            if (!e.w && !e.c && !e.r) continue;
             const d = s.docTouches[rel] || (s.docTouches[rel] = { reads: 0, writes: 0 });
             if (e.w && !c.is_error) d.bashWrites = (d.bashWrites || 0) + 1;
             else if (e.w && c.is_error) d.bashWritesDenied = (d.bashWritesDenied || 0) + 1;
-            if (e.r && !e.w) d.bashReads = (d.bashReads || 0) + 1;
+            if (e.c && !c.is_error) d.cleared = (d.cleared || 0) + 1;
+            if (e.r && !e.w && !e.c) d.bashReads = (d.bashReads || 0) + 1;
           }
         }
+        const acts = pendingGitActs.get(c.tool_use_id);
+        if (acts) {
+          pendingGitActs.delete(c.tool_use_id);
+          if (!c.is_error) { s.gitCommits += acts.commits; s.prMerges += acts.merges; }
+        }
+        // A DECLINE is the user answering the question, not a tool failure: reports read
+        // "The user doesn't want to proceed" as an error and called a working ask a weak point.
+        const isDecline = c.is_error && /\buser (?:doesn'?t want to proceed|declined|chose not)\b/i.test(text);
         if (t) {
           t.resultChars += chars;
           if (isHookBlock) t.hookBlocks = (t.hookBlocks || 0) + 1;
+          else if (isDecline) t.declines = (t.declines || 0) + 1;
           else if (c.is_error) t.errors += 1;
         }
         if (info.skill) s.skillInvocations[info.skill].injectedChars += chars;
@@ -398,7 +566,11 @@ async function analyzeTranscript(file, window) {
         }
       }
       const textJoined = content.filter((c) => c.type === 'text').map((c) => c.text || '').join('\n');
-      if (!hasResult && !o.isMeta && textJoined.trim() && !isInjectedText(textJoined)) {
+      if (/^\s*Stop hook feedback:/.test(textJoined)) {
+        s.stopHookBlocks = (s.stopHookBlocks || 0) + 1;
+        attributeDenial(textJoined);
+      }
+      if (!hasResult && !o.isMeta && textJoined.trim() && !isInjectedText(textJoined) && firstOfTurn()) {
         s.userPrompts++;
         if (prevAssistantNoTool) { s.unheldStopCandidates.push({ stopTs: prevAssistantNoTool, userTs: o.timestamp || null }); prevAssistantNoTool = null; }
       }
@@ -661,8 +833,13 @@ function hookJoinStats(main, agents, hookLog, tools) {
   // Compare only calls inside the ledger's own window: a ledger wired mid-session
   // (instrumentation installed during the run) legitimately misses everything before
   // its first row - measured at 67 of an 80-row "gap" in a real install session.
+  // A 35-58ms hook latency is NOT a coverage gap: comparing raw timestamps put the ledger row a
+  // few ms outside the transcript's own window and printed '1 call outside the window' plus a FALSE
+  // 'wired mid-session' line over 62/62 and 194/194 real coverage, across 16 bundles. Widen the
+  // window by the hook's own latency budget before comparing.
+  const HOOK_LATENCY_MS = 250;
   const allTs = [main, ...agents.map((a) => a.stats)].flatMap((src) => src.toolCallTs || []);
-  const inWin = allTs.filter((ts) => ts >= hookLog.firstTs && ts <= hookLog.lastTs).length;
+  const inWin = allTs.filter((ts) => ts >= hookLog.firstTs - HOOK_LATENCY_MS && ts <= hookLog.lastTs + HOOK_LATENCY_MS).length;
   // Anchor coverage to the ACTIVE window (after a mid-file /clear) - the raw span counted a
   // dead 23h50m gap as uncovered session time, reporting ~6% coverage for a ~96%-covered
   // 89-minute work window (measured).
@@ -673,8 +850,11 @@ function hookJoinStats(main, agents, hookLog, tools) {
   // A quiet tail (zero calls after the ledger's last row) and a real coverage gap read the
   // same in percentages - count the tail's calls so the report can tell them apart
   // (measured: an idle 38%-of-session tail with 0 tool calls was reported as unlogged activity).
-  const tailCalls = allTs.filter((ts) => ts > hookLog.lastTs).length;
-  return { trTools, coverage: { inWin, pct, outside: trTools - inWin, tailCalls, unmatched: Math.max(0, inWin - hookLog.rows) } };
+  const tailCalls = allTs.filter((ts) => ts > hookLog.lastTs + HOOK_LATENCY_MS).length;
+  // CALL coverage leads, wall clock follows: a session whose last hour is one idle await_summary
+  // reads as 38% time-covered and 100% call-covered, and the second number is the true one.
+  const callPct = allTs.length ? Math.round((100 * inWin) / allTs.length) : 100;
+  return { trTools, coverage: { inWin, callPct, pct, outside: trTools - inWin, tailCalls, unmatched: Math.max(0, inWin - hookLog.rows) } };
 }
 
 function printReport(main, agents, hookLog, window, blockLedger) {
@@ -685,6 +865,23 @@ function printReport(main, agents, hookLog, window, blockLedger) {
   }
   if (window) console.log(`windowed: ${window.fromStr || 'start'} → ${window.toStr || 'end'} (subagents dispatched outside the window are excluded)`);
   console.log(`user prompts ${main.userPrompts} · API messages ${main.total.msgs} · compactions ${main.compactions} · API errors ${main.apiErrors} · git commits ${main.gitCommits || 0}${main.prMerges ? ` (+${main.prMerges} pr-merge)` : ''}`);
+  // The PEAK is what every threshold in the stack keys off; the average understated it by 17-43%.
+  if (main.peakCtx) console.log(`peak ctx ${fmt(main.peakCtx)} per message${main.peakCtxAt ? ` (at ${main.peakCtxAt})` : ''} - the number every fresh-session threshold is measured against, not the average below`);
+  if (main.thinkingTokens) console.log(`thinking ${fmt(main.thinkingTokens)} tok (cost-state.modelUsage) - billed, and attributable to no single message: spike residuals close against this, not against tool output`);
+  if (main.floorCtx) {
+    const share = main.total.cacheRead ? Math.round((100 * main.floorCtx * main.total.msgs) / main.total.cacheRead) : null;
+    console.log(`standing inventory ~${fmt(main.floorCtx)} tok/msg (system prompt + tool schemas + CLAUDE.md + always-on rules) - paid on EVERY message${share != null ? `, ~${share}% of cache-read` : ''}, and re-paid in full after every compaction`);
+  }
+  if (main.modelIdsFull && main.modelIdsFull.length) console.log(`models (with window suffix, from cost-state) ${main.modelIdsFull.join(', ')} - the assistant messages strip the suffix, and it is what picks the context tier`);
+  if (main.totalCostUSD != null) console.log(`billed $${Number(main.totalCostUSD).toFixed(2)} (cost-state)`);
+  if (main.stopHookBlocks) console.log(`Stop-hook denials ${main.stopHookBlocks} - these arrive as meta user TEXT, not tool results, so they are absent from the hook-blk column below`);
+  {
+    const byHook = Object.entries(main.denialsByHook || {}).sort((a, b) => b[1] - a[1]);
+    if (byHook.length) console.log(`denials by hook: ${byHook.map(([h, n]) => `${h}×${n}`).join(', ')} - the bracket is attribution only; '(unattributed)' is the JSON permission route, not a missing block`);
+  }
+  for (const c of main.compactionEvents || []) {
+    console.log(`  compaction ${c.ts || '?'}: ${c.pre != null ? fmt(c.pre) : '?'} -> ${c.post != null ? fmt(c.post) : '?'} tok, dropped ${c.dropped != null ? fmt(c.dropped) : '?'}${c.durationMs ? `, ${dur(c.durationMs)}` : ''}${c.trigger ? ` (${c.trigger})` : ''}`);
+  }
   {
     const evs = (main.apiErrorEvents || []).filter((e) => e.ctx != null);
     if (evs.length) console.log(`  API errors fired at ctx ${evs.slice(0, 5).map((e) => `~${fmt(e.ctx)}`).join(', ')}${evs.length > 5 ? ` … +${evs.length - 5} more` : ''} - a cluster at high ctx is context pressure, not provider flakiness`);
@@ -769,7 +966,7 @@ function printReport(main, agents, hookLog, window, blockLedger) {
     }
   }
 
-  console.log('\nTOOLS (main + subagents; result volume = what lands back in context; hook-blk = guard denials, the gate working - not tool failures)');
+  console.log('\nTOOLS (main + subagents; result volume = what lands back in context; hook-blk = PreToolUse denials - a denial may be a FALSE POSITIVE, so read the block before scoring it as the gate working)');
   console.log(`  ${pad('tool', 28)} ${rpad('calls', 5)} ${rpad('results', 9)} ${rpad('errors', 6)} ${rpad('hook-blk', 8)}`);
   {
     // Top 15 by result volume, PLUS any dropped row carrying errors or hook blocks - a
@@ -808,7 +1005,7 @@ function printReport(main, agents, hookLog, window, blockLedger) {
     const j = hookJoinStats(main, agents, hookLog, agg.tools);
     if (j.coverage) {
       console.log(`  coverage: ledger window ${hookLog.firstTs} → ${hookLog.lastTs} spans ~${j.coverage.pct}% of the session`);
-      console.log(`  cross-check: ${j.coverage.inWin} in-window transcript tool calls vs ${hookLog.rows} ledger rows (${j.trTools} calls in the whole session)`);
+      console.log(`  cross-check: ${j.coverage.callPct}% of tool calls are inside the ledger window - ${j.coverage.inWin} of ${j.trTools} - vs ${hookLog.rows} ledger rows`);
       if (j.coverage.outside > 0) console.log(`  ${j.coverage.outside} call${j.coverage.outside === 1 ? '' : 's'} outside the ledger window (${j.coverage.tailCalls} after its last row${j.coverage.tailCalls === 0 ? ' - a quiet tail, not lost coverage' : ''}) - a ledger wired mid-session legitimately misses the head`);
       if (j.coverage.unmatched > 0) console.log(`  ${j.coverage.unmatched} in-window call${j.coverage.unmatched === 1 ? '' : 's'} with no ledger row - check each call's own tool_result for a Blocked:/error string (harness-level blocks and input-validation failures never reach PreToolUse) before calling it a gap`);
     } else {
@@ -822,7 +1019,24 @@ function printReport(main, agents, hookLog, window, blockLedger) {
 // so a report author cannot misquote the numbers (measured: 5 wrong claims across 4
 // hand-written session reports, each a prose restatement of tool output). The FILL IN
 // sections at the end are the only judgment surface.
-function printMarkdown(main, agents, hookLog, window) {
+function printMarkdown(main, agents, hookLog, window, blockLedger) {
+  const extraFacts = [];
+  if (main.peakCtx) extraFacts.push(`- **Peak context** ${fmt(main.peakCtx)} tokens per message${main.peakCtxAt ? ` (at ${main.peakCtxAt})` : ''} - every fresh-session threshold is measured against this, not the average.`);
+  if (main.thinkingTokens) extraFacts.push(`- **Thinking** ${fmt(main.thinkingTokens)} tokens (\`cost-state.modelUsage\`) - billed, attributable to no single message.`);
+  if (main.floorCtx) {
+    const share = main.total.cacheRead ? Math.round((100 * main.floorCtx * main.total.msgs) / main.total.cacheRead) : null;
+    extraFacts.push(`- **Standing inventory** ~${fmt(main.floorCtx)} tokens/message (system prompt + tool schemas + CLAUDE.md + always-on rules) - paid on EVERY message${share != null ? `, ~${share}% of cache-read` : ''}, and re-paid in full after every compaction.`);
+  }
+  if (main.modelIdsFull && main.modelIdsFull.length) extraFacts.push(`- **Models (with window suffix)** ${main.modelIdsFull.map((m) => `\`${m}\``).join(', ')} - from \`cost-state\`; the assistant messages strip the suffix, and it is what picks the context tier.`);
+  if (main.totalCostUSD != null) extraFacts.push(`- **Billed** $${Number(main.totalCostUSD).toFixed(2)} (\`cost-state\`).`);
+  if (main.stopHookBlocks) extraFacts.push(`- **Stop-hook denials** ${main.stopHookBlocks} - meta user TEXT, not tool results, so absent from the \`hook-blk\` column.`);
+  {
+    const byHook = Object.entries(main.denialsByHook || {}).sort((a, b) => b[1] - a[1]);
+    if (byHook.length) extraFacts.push(`- **Denials by hook**: ${byHook.map(([h, n]) => `\`${h}\` x${n}`).join(', ')} - the bracket is attribution only; \`(unattributed)\` is the JSON permission route.`);
+  }
+  for (const c of main.compactionEvents || []) {
+    extraFacts.push(`- **Compaction** ${c.ts || '?'}: ${c.pre != null ? fmt(c.pre) : '?'} -> ${c.post != null ? fmt(c.post) : '?'} tokens, dropped ${c.dropped != null ? fmt(c.dropped) : '?'}${c.durationMs ? `, ${dur(c.durationMs)}` : ''}.`);
+  }
   const agg = computeAggregates(main, agents);
   const out = [];
   const span = main.firstTs && main.lastTs ? new Date(main.lastTs) - new Date(main.firstTs) : null;
@@ -854,6 +1068,7 @@ function printMarkdown(main, agents, hookLog, window) {
   out.push(`| Models (main) | ${Object.entries(main.byModel).map(([m, t]) => `\`${m}\` ×${t.msgs}`).join(', ') || '-'} |`);
   out.push(`| Subagent transcripts | ${agents.length} |`);
   out.push(`| Hook ledger | ${hookLog ? `joined (${hookLog.rows} rows)` : 'absent - identity attribution unavailable, not inferred'} |`, '');
+  if (extraFacts.length) out.push('', ...extraFacts, '');
 
   out.push('## Tokens (deduped per API message; ctx/msg = avg context re-sent per call)', '');
   out.push('| scope | input | cache-write | cache-read | output | msgs | ctx/msg |', '|---|---|---|---|---|---|---|');
@@ -908,6 +1123,7 @@ function printMarkdown(main, agents, hookLog, window) {
   const docEntries = Object.entries(agg.docRows).sort((a, b) => (b[1].main + b[1].agents) - (a[1].main + a[1].agents));
   if (docEntries.length || agg.inject || agg.attach) {
     out.push('## Generated docs (reads = orientation happening, writes = capture/loop maintenance)', '');
+    out.push('_A **lower bound**. This table reads the Bash command text, so doc I/O routed through a script the session WROTE and then ran is invisible to it - measured at 5 reported against >=53 real. When a session writes its own helper, name that script here and treat the counts as a floor._', '');
     out.push('| doc | main-reads | agent-reads | writes | via Bash (r/w) |', '|---|---|---|---|---|');
     for (const [rel, r] of docEntries) out.push(`| ${rel} | ${r.main} | ${r.agents} | ${r.writes} | ${(r.bashReads || r.bashWrites) ? `${r.bashReads || 0}/${r.bashWrites || 0}` : ''} |`);
     if (agg.attach) out.push(`| (style rule attached on file touch) | - | - | ×${agg.attach} | |`);
@@ -927,7 +1143,7 @@ function printMarkdown(main, agents, hookLog, window) {
   }
 
   out.push('## Tools (main + subagents; result volume = what lands back in context)', '');
-  out.push('`hook-blk` = PreToolUse guard denials - the gate working, never a tool failure.', '');
+  out.push('`hook-blk` = PreToolUse denials. A denial is not automatically the gate working - it may be a FALSE POSITIVE, and a false positive costs the denial text plus the whole retried turn. Read the block before scoring it. (Shipped verbatim over sessions whose blocks were 2 of 2 and 3 of 3 false positives, across 11 bundles.)', '');
   out.push('| tool | calls | results | errors | hook-blk |', '|---|---|---|---|---|');
   {
     const rows = Object.entries(agg.tools).sort((a, b) => b[1].resultChars - a[1].resultChars);
@@ -950,7 +1166,7 @@ function printMarkdown(main, agents, hookLog, window) {
     out.push('## Hook-log join (identity ledger; tokens come from the transcript)', '');
     if (j.coverage) {
       out.push(`- Coverage: ledger window ${hookLog.firstTs} → ${hookLog.lastTs} spans ~${j.coverage.pct}% of the session.`);
-      out.push(`- Cross-check: ${j.coverage.inWin} in-window transcript tool calls vs ${hookLog.rows} ledger rows (${j.trTools} calls in the whole session).`);
+      out.push(`- Cross-check: ${j.coverage.callPct}% of tool calls are inside the ledger window - ${j.coverage.inWin} of ${j.trTools} - vs ${hookLog.rows} ledger rows.`);
       if (j.coverage.outside > 0) out.push(`- ${j.coverage.outside} call${j.coverage.outside === 1 ? '' : 's'} outside the ledger window (${j.coverage.tailCalls} after its last row${j.coverage.tailCalls === 0 ? ' - a quiet tail, not lost coverage' : ''}) - a ledger wired mid-session legitimately misses the head.`);
       if (j.coverage.unmatched > 0) out.push(`- ${j.coverage.unmatched} in-window call${j.coverage.unmatched === 1 ? '' : 's'} with no ledger row - check each call's own tool_result for a Blocked:/error string (harness-level blocks and input-validation failures never reach PreToolUse) before calling it a gap.`);
     } else {
@@ -959,6 +1175,22 @@ function printMarkdown(main, agents, hookLog, window) {
     out.push('');
   }
 
+  // The markdown emitter never received the ledger at all, so the bundle reports the sweeps
+  // actually read carried no guard-block section - 7 confirmations, while the terminal report
+  // printed one from the same data.
+  out.push('## Guard blocks (which guard fired; a block costs its denial text plus the retried turn)', '');
+  if (blockLedger && blockLedger.rows) {
+    out.push('_A block is not automatically the gate working. A FALSE positive is the most expensive event in this table - it costs the denial plus the whole retried turn - so read each top reason and say whether it stopped honest work._', '');
+    out.push('| hook | blocks | event / tool | top reason |', '|---|---|---|---|');
+    for (const [hook, e] of Object.entries(blockLedger.byHook).sort((a, b) => b[1].blocks - a[1].blocks)) {
+      const top = [...e.reasons.entries()].sort((x, y) => y[1] - x[1])[0];
+      const where = [...e.events].join(',') + (e.tools.size ? ' / ' + [...e.tools].join(',') : '');
+      out.push(`| \`${hook}\` | ${e.blocks} | ${where} | ${((top && top[0]) || '').replace(/\|/g, '\\|')} |`);
+    }
+    out.push('', `${blockLedger.rows} block(s) total.`, '');
+  } else {
+    out.push('_No ledger rows. That means EITHER no guard fired OR the ledger was never written - say which, do not infer. The transcript alone records which TOOL was denied, never which hook._', '');
+  }
   out.push('## Waste analysis - FILL IN', '', '_Ranked by tokens wasted. Every claim cites a table row above, or a transcript measurement labeled as such._', '');
   out.push('## Protocol check - FILL IN', '', "_One verdict per skill run, judged against that skill's own SKILL.md steps, citing the transcript turn that proves it. Mark unavailable rather than inferring._", '');
   out.push('## Verdict - FILL IN', '', '| skill | worked as intended | biggest strength | biggest waste source | one concrete suggestion |', '|---|---|---|---|---|', '');
@@ -1010,15 +1242,20 @@ async function main() {
   const mainStats = await analyzeTranscript(target, window);
   const agents = await analyzeSubagents(target, window);
   const hookLog = hookFile ? await analyzeHookLog(hookFile) : null;
+  // ONE ledger read, handed to every emitter. --report-md and --json used to drop it entirely,
+  // so the bundle reports that quote the markdown - the ones the sweeps actually read - carried no
+  // guard-block section at all (7 confirmations), while the terminal report had it.
+  const blockLedger = readBlockLedger(blockDir);
   if (asJson) {
-    console.log(JSON.stringify(window ? { window: { from: fromStr, to: toStr }, main: mainStats, agents, hookLog } : { main: mainStats, agents, hookLog }, null, 2));
+    const body = { main: mainStats, agents, hookLog, hookBlocks: blockLedger };
+    console.log(JSON.stringify(window ? { window: { from: fromStr, to: toStr }, ...body } : body, null, 2));
     return;
   }
   if (asMd) {
-    printMarkdown(mainStats, agents, hookLog, window);
+    printMarkdown(mainStats, agents, hookLog, window, blockLedger);
     return;
   }
-  printReport(mainStats, agents, hookLog, window, readBlockLedger(blockDir));
+  printReport(mainStats, agents, hookLog, window, blockLedger);
 }
 
 main().catch((e) => { console.error(e.message); process.exit(1); });
