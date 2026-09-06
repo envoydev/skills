@@ -160,8 +160,19 @@ const git = (args) => execSync(`git ${args}`, { cwd: root, timeout: 5000 }).toSt
 // INTO it moments before the act, so counting it inflated both the trivial-diff bar and the spec
 // check - a conformant `spec: 3 files` read as covering 3 of 4 because the fourth was the receipt.
 const docsPrefix = () => {
-  const d = docsRootEnv().replace(/\\/g, '/').replace(/^\.\//, '').replace(/\/+$/, '');
-  return d && !path.isAbsolute(d) ? `${d}/` : null;
+  let d = docsRootEnv().replace(/\\/g, '/').replace(/^\.\//, '').replace(/\/+$/, '');
+  if (!d) return null;
+  // An ABSOLUTE docs root can still sit INSIDE the repo, and then the receipt this gate is reading
+  // counts as one of the changed files its own `spec:` line is measured against - so a conformant
+  // receipt fails its own count and the gate blocks the commit it just authorized. Relativize
+  // against the repo root and exclude it whenever it lands inside; a root genuinely outside the
+  // tree has nothing to exclude.
+  if (path.isAbsolute(d)) {
+    const rel = path.relative(root, d).replace(/\\/g, '/');
+    if (!rel || rel.startsWith('..')) return null;
+    d = rel;
+  }
+  return `${d}/`;
 };
 function changedFiles() {
   const pre = docsPrefix();
