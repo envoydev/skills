@@ -62,12 +62,19 @@ function isDotnetManifest(file)
 }
 
 // Ordered [{pkg, rel}] across every manifest - first catalog match wins, so order is stable.
+// A repo-relative path that goes into REPORTED text is written with forward slashes on every
+// platform. `path.relative` hands back the native separator, so on Windows the same project
+// produced `src\\Api\\Api.csproj` where every other machine produced `src/Api/Api.csproj` - the
+// evidence reason the guided walk shows the user, and the string a selection is attributed by.
+// The separator is presentation here, never a lookup: nothing reads these back as a path.
+const relPosix = (root, file) => path.relative(root, file).split(path.sep).join('/');
+
 function collectPackages(root, files)
 {
     const out = [];
     for (const file of files)
     {
-        const rel = path.relative(root, file);
+        const rel = relPosix(root, file);
         if (isDotnetManifest(file))
         {
             const text = readCapped(file);
@@ -127,21 +134,21 @@ function scan(root, catalog)
             if (!hit) for (const glob of entry.files || [])
             {
                 const f = files.find(x => basenameMatches(glob, x));
-                if (f) { hit = `${path.relative(root, f)} present`; break; }
+                if (f) { hit = `${relPosix(root, f)} present`; break; }
             }
             if (!hit) for (const c of entry.csprojContent || [])
             {
                 const re = safeRegex(c.regex, `${layer} ${name} csprojContent`);
                 if (!re) continue;
                 const f = dotnetManifests.find(x => { const t = readCapped(x); return t !== null && re.test(t); });
-                if (f) { hit = `${c.label || c.regex} in ${path.relative(root, f)}`; break; }
+                if (f) { hit = `${c.label || c.regex} in ${relPosix(root, f)}`; break; }
             }
             if (!hit) for (const c of entry.content || [])
             {
                 const re = safeRegex(c.regex, `${layer} ${name} content`);
                 if (!re) continue;
                 const f = files.find(x => basenameMatches(c.glob, x) && (t => t !== null && re.test(t))(readCapped(x)));
-                if (f) { hit = `${c.label || c.regex} in ${path.relative(root, f)}`; break; }
+                if (f) { hit = `${c.label || c.regex} in ${relPosix(root, f)}`; break; }
             }
             if (hit) found[layer][name] = hit;
         }

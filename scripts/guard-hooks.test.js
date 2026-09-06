@@ -1092,3 +1092,25 @@ test('guard-read-whole-file: a shell touch names the convention rule the file to
   assert.equal(ctxOf(blocked), '', 'and announces nothing');
   assert.match(ctxOf(call(`grep -n Foo ${BIG}`, s2)), /javascript-conventions\.md/, 'the next allowed touch still gets it');
 });
+
+test('guard-ungated-commit: an ABSOLUTE docs root inside the repo does not fail its own receipt', () => {
+  // The receipt lives under the docs root, so it is itself an untracked changed file. `docsPrefix`
+  // excluded it only for a RELATIVE root and returned null for an absolute one - so a project whose
+  // docs root is set to an absolute path INSIDE the repo (the shape blocker B4 was about) had every
+  // conformant receipt fail its own `spec:` count, and the gate blocked the commit it had just
+  // authorized. Found by porting this hook to the Cursor twin, where the payload carries no
+  // CLAUDE_PROJECT_DIR and an absolute docs root is the natural spelling.
+  const dir = scratchRepo();
+  const docs = path.join(dir, '.claude', 'docs');           // absolute, and inside the tree
+  fs.mkdirSync(path.join(docs, 'flow'), { recursive: true });
+  const head = spawnSync('git', ['-C', dir, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).stdout.trim();
+  fs.writeFileSync(path.join(docs, 'flow', 'COMMIT-GATE'),
+    `VERIFIED the three fixtures\nauthorized: "commit it"\nhead: ${head}\nspec: 3 files - the fixtures\nlive-probe: tests green\n`);
+  const status = spawnSync(process.execPath, [path.join(HOOKS, 'guard-ungated-commit.js')], {
+    input: JSON.stringify({ tool_name: 'Bash', tool_input: { command: 'git commit -am wip' } }),
+    encoding: 'utf8',
+    env: { ...process.env, CLAUDE_PROJECT_DIR: dir, CLAUDE_STACK_DOCS_PATH: docs },
+    cwd: dir,
+  }).status;
+  assert.equal(status, 0, 'a conformant receipt under an absolute in-repo docs root passes');
+});

@@ -1,7 +1,7 @@
 {
   "name": "claude-stack",
   "description": "The Claude Code stack, guided: setup installs it from scratch into a project (or globally), update refreshes an existing install and prunes what upstream removed, configure adjusts the selection (add or drop), validate reconciles an install to the project - prunes what its framework does not use and adds what the detected stacks are missing - all drive a dependency-complete selection with a prerequisite check; status shows the install read-only, per-area tables.",
-  "version": "0.2.55",
+  "version": "0.2.56",
   "author": {
     "name": "envoydev",
     "url": "https://github.com/envoydev"

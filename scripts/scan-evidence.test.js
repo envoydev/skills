@@ -140,3 +140,16 @@ test('a catalog regex that does not compile is skipped with a named warning, the
     }
     finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
+
+test('every reported path uses forward slashes, on every platform', () =>
+{
+    // `path.relative` returns the NATIVE separator, so the same project reported
+    // `MassTransit in src\Api\Api.csproj` on Windows and `src/Api/Api.csproj` everywhere else.
+    // That string is the evidence reason the guided walk shows the user and attributes a selection
+    // by, so it must not change shape with the machine. Caught by running the suite on
+    // windows-latest for the first time.
+    const root = buildFixture();
+    const hits = JSON.stringify(scan(root));
+    assert.ok(/src\/Api\/Api\.csproj/.test(hits), 'the reported path is posix-style');
+    assert.ok(!/[A-Za-z0-9]\\\\[A-Za-z0-9]/.test(hits), 'no native separator survives into a reported path');
+});

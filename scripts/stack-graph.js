@@ -8,6 +8,18 @@
 // so prose words like the English 'memory' never create a false edge.
 'use strict';
 const fs = require('fs');
+// --- CRLF normalization, once, at the boundary --------------------------------------------------
+// A Windows checkout has CRLF line endings (git's autocrlf converts on the way out), and JS treats
+// `\r` as a LINE TERMINATOR: `.` does not match it. So a pattern ending `(#.*)?$` fails on every
+// commented line, and the installer parity check reported the ENTIRE MCP block missing from the
+// .ps1 twin - eight false findings, on a repo where the twins were in perfect sync. Text read here
+// is never sensitive to which bytes end a line, so normalize every utf8 read and let every regex
+// below stay written for `\n`.
+const _readFileSync = fs.readFileSync;
+fs.readFileSync = (p, o) => ((o === 'utf8' || (o && o.encoding === 'utf8'))
+    ? String(_readFileSync(p, o)).replace(/\r\n/g, '\n')
+    : _readFileSync(p, o));
+
 const path = require('path');
 const yaml = require('js-yaml');
 const lint = require('./lint-skills.js');
