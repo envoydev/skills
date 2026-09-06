@@ -25,19 +25,34 @@ Invoke-WebRequest -Uri https://github.com/envoydev/claude-stack/releases/latest/
 Expand-Archive -LiteralPath "$TMP/claude-stack.zip" -DestinationPath "$TMP/repo"
 ```
 
-**Carry `$TMP` in a MARKER FILE, and address every run artifact through it.** Each Bash call is its
-own shell, so a `TMP=$(mktemp -d)` set in one call is gone by the next and every run invents its own
-way of remembering it. The idiom, once, in both homes:
+**Carry `$TMP` in a MARKER FILE KEYED BY THE PROJECT, and address every run artifact through it.**
+Each Bash call is its own shell, so a `TMP=$(mktemp -d)` set in one call is gone by the next and
+every run invents its own way of remembering it. The marker name is DERIVED, never a fixed path:
+two Claude Code sessions on one machine run these commands concurrently in different projects, and
+a shared `/tmp/claude-stack-run.path` hands the second run's `$TMP` to the first - measured: an
+installer log came back holding the other session's lines, and the other session's cleanup step
+deleted the still-live `$TMP` out from under a run in progress. Derive the key from the project
+root, which is stable across every call of one run and different for every project:
 
 ```bash
-TMP=$(mktemp -d); printf '%s\n' "$TMP" > /tmp/claude-stack-run.path   # first call
-TMP=$(cat /tmp/claude-stack-run.path)                                  # every later call
+MARK="/tmp/claude-stack-run.$(printf '%s' "$(git rev-parse --show-toplevel 2>/dev/null || pwd)" | tr -c 'A-Za-z0-9' '-' | cut -c1-80).path"
+TMP=$(mktemp -d); printf '%s\n' "$TMP" > "$MARK"                      # first call
+TMP=$(cat "$MARK"); [ -d "$TMP/repo" ] || echo "STALE MARKER"          # every later call
 ```
+
+The staleness check is part of the idiom: a marker left behind by an earlier run points at a `$TMP`
+that no longer exists, and every later step then writes into a path with no directory. On `STALE
+MARKER`, download again from the top rather than continuing.
 
 Every artifact this run writes or reads - `raw.json`, `selection.txt`, `select.out`, `final.json` -
 is named as `"$TMP/<file>"`, never bare. A bare relative name resolves against whatever cwd the
 shell drifted to, and the six sites that carried one were saved only by a model choosing an absolute
-path on its own initiative. PowerShell keeps `$TMP` the same way, in the same marker file.
+path on its own initiative. PowerShell keeps `$TMP` the same way, in a marker keyed the same way:
+
+```powershell
+$Root = (git rev-parse --show-toplevel 2>$null); if (-not $Root) { $Root = (Get-Location).Path }
+$Mark = Join-Path ([System.IO.Path]::GetTempPath()) ('claude-stack-run.' + (($Root -replace '[^A-Za-z0-9]','-')) + '.path')
+```
 
 - The archive is the newest release - the repo's release workflow republishes it on every
   release merge to `main`, tagged `v<version>` from the plugin manifest, so the release version
@@ -122,9 +137,10 @@ fallback cloned), and never deletes a source it was handed - cleanup is the comm
 
 ## Clean up the temp dir - ALWAYS
 
-`rm -rf "$TMP"` (PowerShell: `Remove-Item -Recurse -Force $TMP`). The archive, the extracted
-repo, and the working files you wrote next to them (`raw.json`, `selection.txt`) live there and
-nothing else will remove them - the installer only cleans up a source IT fetched, never the one
+`rm -rf "$TMP" "$MARK"` (PowerShell: `Remove-Item -Recurse -Force $TMP, $Mark`) - the MARKER goes
+with the temp dir it names, or the next run in this project reads a path that no longer exists. The
+archive, the extracted repo, and the working files you wrote next to them (`raw.json`,
+`selection.txt`) live there and nothing else will remove them - the installer only cleans up a source IT fetched, never the one
 you passed via `--source`. Do this on EVERY exit path, not just the happy one - each command's
 final step lists its own exit cases. Then confirm the project tree holds only installed
 artifacts - no archive, no extracted repo, no `raw.json`/`selection.txt`, no installer copy.

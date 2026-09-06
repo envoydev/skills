@@ -7,15 +7,26 @@ disable-model-invocation: true
 
 You are bootstrapping the claude-stack FROM SCRATCH. If the stack is already installed here (a populated `.claude/skills` + `.claude/agents`, or the global account equivalents in no-project mode), stop and route to a sibling command: `/claude-stack:update` for a plain refresh, `/claude-stack:configure` to adjust the selection - updates are their job. Work the ladder in order and drive it interactively; the deterministic work is done by `stack-select.js`, you orchestrate. Two modes, detected silently before the first question: **project mode** (the normal case - cwd is a project root in a git repo; the selection is decided from the project itself) and **no-project mode** (anything else - a global install seeded from the recommended set).
 
-**This run needs NO conversation context - decide WHERE to run it first.** Before anything
-downloads, put it through AskUserQuestion: run here anyway, or run in a fresh session
-(recommended). Quote THIS session's own per-message context (`input + cache_read +
-cache_creation` off the last assistant message) against the run's own budget - never a figure
-measured in some other session. Every answer names its next action: fresh session -> give the
-paste-ready one-liner and end the turn; run here -> start step 1 now; not now -> say what is
-owed and end the turn. If a redirect displaces the ask, re-offer it ONCE. Measured: this
-command's siblings entered at 131,345 and 168,516 tokens per message with no ask at all, and
-one of them authored its own prose decision that was never put to the user.
+**This run needs NO conversation context - so it is worth MOVING, but only out of a session that
+is actually loaded.** Measure before you ask: this session's own per-message context is `input +
+cache_read + cache_creation` off the last assistant message in the transcript. Ask ONLY when that
+figure is past the same trigger `guard-fresh-session-start.js` uses - `CLAUDE_STACK_FRESH_SESSION_PCT`
+percent (default 40) of the resolved context window - `CLAUDE_STACK_CONTEXT_WINDOW`, else the
+settings.json model id's own `[1m]`-style suffix, else what the session has already carried, else
+200,000 - floored at 150,000 on a 200k window and capped at 250,000 above it, so a default install
+triggers at 150,000 tokens per message - or when that hook has already injected the ask into this turn. Below the
+trigger, or when the figure cannot be read at all, SKIP the ask silently and start step 1: an ask
+with no measurement behind it is the failure this replaced (measured: it fired on the FIRST message
+of a brand-new session, twice in one run, and could quote no number when the user challenged it).
+Never author the decision in prose either way.
+
+When it does fire, put it through AskUserQuestion: run here anyway, or run in a fresh session
+(recommended), quoting the figure you measured - never one measured in some other session. Every
+answer names its next action: fresh session -> give the paste-ready one-liner and end the turn;
+run here -> start step 1 now; not now -> say what is owed and end the turn. If a redirect displaces
+the ask, re-offer it ONCE. Measured: this command's siblings entered at 131,345 and 168,516 tokens
+per message with no ask at all, and one of them authored its own prose decision that was never put
+to the user.
 
 **ONE release archive is the entire download** - read `${CLAUDE_PLUGIN_ROOT}/references/source-protocol.md` before step 1 and hold the whole run to it: download + extract once into `$TMP/repo` (the reference owns the fallback), use every tool from that snapshot, hand it to the installer with `--source` in step 10, and remove `$TMP` per the 'Clean up' section on every exit path. The protocol's 'Narrate, don't trace' section governs every tool call in this run: one quiet call per recompute, no pasted tool output, one narration line between steps.
 
@@ -178,7 +189,7 @@ Report what still needs a hand: LSP tools (`csharp-ls` via `dotnet tool install 
 
 1. **Git hygiene (project mode).** Suggest ignoring the machine-local artifacts this install creates - only entries that apply to the selection and are not already covered by the project's ignore rules: `.claude/` (the install + stamp + the default docs root), `.serena/` (LSP cache + project memories - when serena is selected), `.mcp.json` (installer-regenerated on every run - fix the template, never this file), plus runtime dirs when present in the tree (`.playwright/`, `.slopwatch/`). Show the exact lines first, then one AskUserQuestion with BOTH homes as options: the committed `.gitignore` (recommended), `.git/info/exclude` for a local-only ignore that touches no committed file, or skip; write only on consent.
 
-2. **The capture sequence** - the deliberate captures that turn a fresh install into an oriented one, in dependency order. List each ONLY when its skill is installed; a missing one gets a single line ('project-code-style-analyzer not installed - add via `/claude-stack:configure`') instead of a dead command:
+2. **The capture sequence** - the deliberate captures that turn a fresh install into an oriented one, in dependency order. Every one of them is the USER's to type: all but `project-architecture-analyzer` are manual-only (`disable-model-invocation`), so a Skill call from this run is blocked - name them, never attempt one and never narrate that you cannot. List each ONLY when its skill is installed; a missing one gets a single line ('project-code-style-analyzer not installed - add via `/claude-stack:configure`') instead of a dead command:
    1. `/project-architecture-analyzer` - writes the durable architecture docs every seat reads to orient.
    2. `/project-code-style-analyzer` - captures the project's real code style and generates the path-scoped project-code-style rule.
    3. `/project-related-context <sibling> ...` - OPTIONAL, and only when this project actually has sibling repos: sibling-repo awareness, args only (local paths or git URLs, e.g. `frontend - ../client`, `backend - ../server`); it never scans on its own. A standalone repo skips it - not a gap. The skill is opt-in, so when it is absent say so in one conditional line ('sibling repos? add `project-related-context` via `/claude-stack:configure`') rather than the flat not-installed line the other captures get.

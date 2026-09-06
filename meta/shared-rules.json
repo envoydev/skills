@@ -1578,7 +1578,7 @@
       ]
     },
     "capabilities-refresh-user-run": {
-      "_note": "The guided commands' /project-agent-capabilities follow-through: the skill is manual-only (disable-model-invocation blocks a Skill call - measured live in an update run), so every command NAMES it in its report as the user's next step and never invokes it. One statement per command because each runs standalone.",
+      "_note": "The manual-only captures are the USER's to type, never invoked from a guided run: all of them except project-architecture-analyzer carry disable-model-invocation, which BLOCKS a Skill call (measured live in an update run). So every command NAMES them in its report or next-steps card as the user's next step and never attempts one. One statement per command because each runs standalone; the behavioural half of the rule - never attempt, never narrate the attempt - is stamped into every project by project-agent-capabilities' usage policy.",
       "owner": {
         "file": "setup-plugin/commands/update.md",
         "marker": "Never invoke it from this run - the skill is manual-only"
@@ -1591,6 +1591,18 @@
         {
           "file": "setup-plugin/commands/configure.md",
           "marker": "the line is addressed to the user, never acted on"
+        },
+        {
+          "file": "setup-plugin/commands/setup.md",
+          "marker": "never attempt one and never narrate that you cannot"
+        },
+        {
+          "file": "setup-plugin/references/post-install.md",
+          "marker": "the assistant cannot invoke one on your behalf"
+        },
+        {
+          "file": "stack/skills/project-agent-capabilities/SKILL.md",
+          "marker": "The harness BLOCKS the Skill call, so never attempt one"
         }
       ]
     },
@@ -3202,6 +3214,31 @@
         {
           "file": "setup-plugin/commands/update.md",
           "marker": "renames first, then the absent-only seeds"
+        }
+      ]
+    },
+    "where-to-run-ask-threshold": {
+      "_note": "The guided commands' step-0 'where to run it' ask is THRESHOLDED, not unconditional: it fires only past the same trigger guard-fresh-session-start.js uses (CLAUDE_STACK_FRESH_SESSION_PCT of the resolved window, 150k floor on the 200k tier, 250k ceiling above it), or when that hook has already injected it. Below the trigger, or with no readable figure, the run starts silently - measured: the unconditional prose form fired on the FIRST message of a brand-new session, twice in one run, with no number behind it. The hook owns the trigger; each command body restates it so the walk and the gate can never sit on different numbers.",
+      "owner": {
+        "file": "stack/hooks/guard-fresh-session-start.js",
+        "marker": "Percent is tunable per machine with CLAUDE_STACK_FRESH_SESSION_PCT"
+      },
+      "sites": [
+        {
+          "file": "setup-plugin/commands/setup.md",
+          "marker": "or when that hook has already injected the ask into this turn"
+        },
+        {
+          "file": "setup-plugin/commands/configure.md",
+          "marker": "or when that hook has already injected the ask into this turn"
+        },
+        {
+          "file": "setup-plugin/commands/validate.md",
+          "marker": "or when that hook has already injected the ask into this turn"
+        },
+        {
+          "file": "setup-plugin/commands/update.md",
+          "marker": "or when that hook has already injected the ask into this turn"
         }
       ]
     }

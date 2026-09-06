@@ -11,15 +11,26 @@ discipline as the sibling commands - drive it interactively, walk one layer at a
 evidence/prerequisite before acting, never add or remove without consent. `stack-select.js` does
 the deterministic work; you orchestrate.
 
-**This run needs NO conversation context - decide WHERE to run it first.** Before anything
-downloads, put it through AskUserQuestion: run here anyway, or run in a fresh session
-(recommended). Quote THIS session's own per-message context (`input + cache_read +
-cache_creation` off the last assistant message) against the run's own budget - never a figure
-measured in some other session. Every answer names its next action: fresh session -> give the
-paste-ready one-liner and end the turn; run here -> start step 1 now; not now -> say what is
-owed and end the turn. If a redirect displaces the ask, re-offer it ONCE. Measured: this
-command's siblings entered at 131,345 and 168,516 tokens per message with no ask at all, and
-one of them authored its own prose decision that was never put to the user.
+**This run needs NO conversation context - so it is worth MOVING, but only out of a session that
+is actually loaded.** Measure before you ask: this session's own per-message context is `input +
+cache_read + cache_creation` off the last assistant message in the transcript. Ask ONLY when that
+figure is past the same trigger `guard-fresh-session-start.js` uses - `CLAUDE_STACK_FRESH_SESSION_PCT`
+percent (default 40) of the resolved context window - `CLAUDE_STACK_CONTEXT_WINDOW`, else the
+settings.json model id's own `[1m]`-style suffix, else what the session has already carried, else
+200,000 - floored at 150,000 on a 200k window and capped at 250,000 above it, so a default install
+triggers at 150,000 tokens per message - or when that hook has already injected the ask into this turn. Below the
+trigger, or when the figure cannot be read at all, SKIP the ask silently and start step 1: an ask
+with no measurement behind it is the failure this replaced (measured: it fired on the FIRST message
+of a brand-new session, twice in one run, and could quote no number when the user challenged it).
+Never author the decision in prose either way.
+
+When it does fire, put it through AskUserQuestion: run here anyway, or run in a fresh session
+(recommended), quoting the figure you measured - never one measured in some other session. Every
+answer names its next action: fresh session -> give the paste-ready one-liner and end the turn;
+run here -> start step 1 now; not now -> say what is owed and end the turn. If a redirect displaces
+the ask, re-offer it ONCE. Measured: this command's siblings entered at 131,345 and 168,516 tokens
+per message with no ask at all, and one of them authored its own prose decision that was never put
+to the user.
 
 **ONE release archive is the entire download** - read `${CLAUDE_PLUGIN_ROOT}/references/source-protocol.md`
 before step 1 and hold the whole run to it: download + extract once into `$TMP/repo`, use

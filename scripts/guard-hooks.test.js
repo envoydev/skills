@@ -1011,8 +1011,8 @@ test('fresh-session window: CLAUDE_STACK_CONTEXT_WINDOW is the user\'s own state
     assert.equal(askLoop(ctxAt('win-env-450k', 450000), winEnv({ CLAUDE_STACK_CONTEXT_WINDOW: '1000000' })), 2, '450k is past 40% of it');
     // ranked BELOW the model id it would be dead on any machine whose settings names a model
     assert.equal(askLoop(hot, winEnv({ CLAUDE_CONFIG_DIR: accountDir('acct-1m3', 'opus[1m]'), CLAUDE_STACK_CONTEXT_WINDOW: '200000' })), 2, 'the override beats the model id');
-    assert.equal(askLoop(hot, winEnv({ CLAUDE_STACK_CONTEXT_WINDOW: 'auto' })), 2, 'a non-numeric value is ignored, not treated as 0');
-    assert.equal(askLoop(hot, winEnv({ CLAUDE_STACK_CONTEXT_WINDOW: '' })), 2, 'a cleared value means auto-detect - the seeded 1000000 is only a default');
+    assert.equal(askLoop(hot, winEnv({ CLAUDE_STACK_CONTEXT_WINDOW: 'AUTO' })), 2, 'the seeded AUTO sentinel means detect, never 0');
+    assert.equal(askLoop(hot, winEnv({ CLAUDE_STACK_CONTEXT_WINDOW: '' })), 2, 'an install still carrying the old empty seed detects the same way');
 });
 
 test('fresh-session window: a percentage below 76 is not inert on a declared 1M window', () => {

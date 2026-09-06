@@ -18,11 +18,22 @@ path near 10k by never reading files or output the steps below do not name.
 
 ## 0. Where to run it
 
-**This run needs NO conversation context**, so it is the cheapest thing in the stack to move.
-Before anything downloads, put the choice through AskUserQuestion - run here anyway vs run in a
-fresh session (recommended). The fast path is ~10k tokens on its own, but every one of its
-messages re-sends whatever this session already carries, so state THIS session's own per-message
-context (`input + cache_read + cache_creation` off the last assistant message) and the ~10k
+**This run needs NO conversation context**, so it is the cheapest thing in the stack to move -
+but only out of a session that is actually loaded. Measure before you ask: this session's own
+per-message context is `input + cache_read + cache_creation` off the last assistant message in the
+transcript. Ask ONLY when that figure is past the same trigger `guard-fresh-session-start.js` uses
+- `CLAUDE_STACK_FRESH_SESSION_PCT` percent (default 40) of the resolved context window
+(`CLAUDE_STACK_CONTEXT_WINDOW`, else the settings.json model id's own `[1m]`-style suffix, else
+what the session has already carried, else 200,000), floored at 150,000 on a 200k window and
+capped at 250,000 above it, so a default install triggers at 150,000 tokens per message - or when that hook has already injected
+the ask into this turn. Below the trigger, or when the figure cannot be read at all, SKIP the ask
+silently and go to step 1: an ask with no measurement behind it is the failure this replaced
+(measured: it fired on the FIRST message of a brand-new session, twice in one run, and could quote
+no number when the user challenged it). Never author the decision in prose either way.
+
+When it does fire, put the choice through AskUserQuestion - run here anyway vs run in a fresh
+session (recommended). The fast path is ~10k tokens on its own, but every one of its messages
+re-sends whatever this session already carries, so state the figure you measured and the ~10k
 budget beside it. Never quote a figure measured in another session: the number that used to sit
 here was ~2x over on lifetime cache-read and ~4.8x over on the tail when it was next checked.
 

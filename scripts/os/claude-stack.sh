@@ -744,7 +744,12 @@ if [ "$INSTALLED_ONLY" = true ]; then
   if ! grep -q '^plugin ' "$SELECTION"; then
     for _io_p in ${PLUGINS[@]+"${PLUGINS[@]}"}; do printf 'plugin %s\n' "${_io_p%%@*}" >> "$SELECTION"; done
   fi
-  grep -q . "$SELECTION" || { echo "error: --installed-only found nothing installed under $_io_claude - run '$0 install' (or the /claude-stack:setup command) first" >&2; rm -rf "$_IO_TMP"; exit 1; }
+  # The nothing-installed guard tests the FILE layers only. A bare `grep -q .` could never fail here:
+  # the plugin fallback directly above appends a line for every manifest plugin, so a derivation that
+  # found zero skills, agents, rules and hooks still carried lines and the run continued to a stamped
+  # no-op update. Plugins are machine-level and mcps come from .mcp.json; neither is evidence that
+  # THIS target has an install.
+  grep -qE '^(skill|agent|rule|hook) ' "$SELECTION" || { echo "error: --installed-only found nothing installed under $_io_claude - run '$0 install' (or the /claude-stack:setup command) first" >&2; rm -rf "$_IO_TMP"; exit 1; }
   # No hooks on disk must stay no hooks: the filter's no-hook-lines special case
   # would otherwise install all of them.
   grep -q '^hook ' "$SELECTION" || HOOKS=()
@@ -1362,11 +1367,11 @@ for _old, _new in (("CLAUDE_DOCS_PATH", "CLAUDE_STACK_DOCS_PATH"),):
 # Environment keys whose SEEDED DEFAULT turned out to be WRONG: clear the key when its value is
 # still exactly that seed - a value the user set by hand is theirs and is never touched. Same list
 # in both installer twins and in meta/migrations.json (the plugin route applies it from there).
-for _key, _bad_seed in (("CLAUDE_STACK_CONTEXT_WINDOW", "1000000"),):
+for _key, _bad_seed, _to in (("CLAUDE_STACK_CONTEXT_WINDOW", "1000000", "AUTO"), ("CLAUDE_STACK_CONTEXT_WINDOW", "", "AUTO")):
     if env.get(_key) == _bad_seed:
-        env[_key] = ""
+        env[_key] = _to
         changed = True
-        print("  settings.json env: %s cleared to auto-detect (the old seed declared a 1M window on every install)" % _key)
+        print("  settings.json env: %s reset to %s (auto-detect)" % (_key, _to))
 # env: project-default auto-compact trigger (compact at ~40% of the context window). Set only when
 # absent, so a project that pins its own value - or holds CONTEXT7_API_KEY here - is never clobbered.
 if "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE" not in env:
@@ -1390,15 +1395,18 @@ if "CLAUDE_STACK_PUSH_GATE" not in env:
 # defaulted to 40 anyway, so the number matched while the setting did nothing).
 if "CLAUDE_STACK_FRESH_SESSION_PCT" not in env:
     env["CLAUDE_STACK_FRESH_SESSION_PCT"] = "40"; changed = True
-# The context window that percentage applies to - seeded EMPTY, which MEANS auto-detect. It was
-# seeded "1000000", and that killed the gate on every install that was not a 1M account: this
-# value is the FIRST layer of the hooks' window resolution, so a stated 1M window on a 200k
-# session put the trigger above anything that session can ever carry, and no offer could fire
-# (ten confirmations across four projects). Empty, the hooks read the settings model id's own
-# window suffix (`opus[1m]`), else the tier the session has already proven. Fill it in only to
-# OVERRULE that - "1000000" or "200000"; the box is written empty so it stays visible here.
+# The context window that percentage applies to - seeded "AUTO", which MEANS auto-detect. The
+# sentinel is a WORD, not an empty string: the box is written so the knob stays visible in the env
+# block, and an empty value there reads as a variable nobody filled in rather than as a decision.
+# Anything that is not a window size falls through to detection identically, so an install still
+# carrying the old "" is reset to AUTO by the pass above. It was seeded "1000000", and that killed
+# the gate on every install that was not a 1M account: this value is the FIRST layer of the hooks'
+# window resolution, so a stated 1M window on a 200k session put the trigger above anything that
+# session can ever carry, and no offer could fire (ten confirmations across four projects). On
+# AUTO the hooks read the settings model id's own window suffix (`opus[1m]`), else the tier the
+# session has already proven. Put a NUMBER here only to OVERRULE that - "1000000" or "200000".
 if "CLAUDE_STACK_CONTEXT_WINDOW" not in env:
-    env["CLAUDE_STACK_CONTEXT_WINDOW"] = ""; changed = True
+    env["CLAUDE_STACK_CONTEXT_WINDOW"] = "AUTO"; changed = True
 if changed:
     json.dump(data, open(path, "w"), indent=2); open(path, "a").write("\n")
     print("  settings.json: hooks + secret deny-list + mcp allow-list + compact default ensured")
@@ -1720,11 +1728,11 @@ The same env block carries the fresh-session gate's two knobs (seeded, absent-on
 hand-edited value survives every update):
   CLAUDE_STACK_FRESH_SESSION_PCT   what share of the context window a session may carry before an
                                    orchestration run is offered a fresh one (default 40; 0 = off)
-  CLAUDE_STACK_CONTEXT_WINDOW      the window that percentage applies to - seeded EMPTY, which
+  CLAUDE_STACK_CONTEXT_WINDOW      the window that percentage applies to - seeded 'AUTO', which
                                    means auto-detect: the hooks read the settings model id's
                                    window suffix ('opus[1m]'), else the tier the session has
-                                   already proven. Fill it in ('1000000' / '200000') only to
-                                   overrule that; the value outranks every detection layer.
+                                   already proven. Put a number there ('1000000' / '200000') only
+                                   to overrule that; it outranks every detection layer.
 On the auto-detected 200k tier the percentage is INERT below 76: the trigger keeps the measured
 150k floor, and 200k x 75% is still 150k. Above that tier it is capped at 250k, because the
 harness auto-compacts at ~390k and a trigger above that ceiling can never fire.

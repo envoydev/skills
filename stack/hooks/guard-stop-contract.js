@@ -95,8 +95,10 @@ const CTX_CEILING = 250000;
 // called the ONLY source; measured on CLI 2.1.258 and 2.1.261. settings.json's
 // `model` (e.g. `opus[1m]`). So, first layer that resolves wins:
 //   1. CLAUDE_STACK_CONTEXT_WINDOW - the user's own statement, so it outranks every guess. It
-//      goes in the scope settings.json `env` block, seeded `1000000` by the installer and meant to
-//      be corrected to `200000` on a 200k model; cleared, it falls through to the layers below.
+//      goes in the scope settings.json `env` block, seeded `AUTO` - the word, so the knob reads as
+//      answered rather than as an empty box someone forgot. Anything that is not a window size
+//      (AUTO, empty, a typo) falls through to the layers below, which is the seeded behaviour;
+//      a NUMBER here is the overrule.
 //      Ranking it BELOW the model id would make it dead on every machine whose settings names a
 //      plain model, since that layer would already have answered 200k.
 //   2. the settings.json model id's own window suffix - `[1m]`, `[200k]`. A property of the id,

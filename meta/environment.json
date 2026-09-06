@@ -63,12 +63,13 @@
     },
     {
       "key": "CLAUDE_STACK_CONTEXT_WINDOW",
-      "default": "",
+      "default": "AUTO",
       "ask": true,
       "asked_with": "CLAUDE_STACK_FRESH_SESSION_PCT",
-      "what": "the context window that percentage applies to. Leave it EMPTY - empty MEANS auto-detect, and that is the right answer on every machine: the gate reads the settings model id's own window suffix (`opus[1m]`), else infers the tier from what the session has already carried. It used to be seeded `1000000`, which killed the gate on every install that was not a 1M account - this value is the FIRST layer of the resolution, so a stated 1M window on a 200k session put the trigger above anything that session can ever carry. Fill it in (`1000000` / `200000`) only to OVERRULE detection.",
+      "what": "the context window that percentage applies to. Leave it `AUTO` - AUTO MEANS auto-detect, and that is the right answer on every machine: the gate reads the settings model id's own window suffix (`opus[1m]`), else infers the tier from what the session has already carried. The seed is that WORD rather than an empty string because an empty box reads as a variable nobody got round to filling in; either value detects, but only one says so. It used to be seeded `1000000`, which killed the gate on every install that was not a 1M account - this value is the FIRST layer of the resolution, so a stated 1M window on a 200k session put the trigger above anything that session can ever carry. Put a NUMBER here (`1000000` / `200000`) only to OVERRULE detection.",
       "validate": {
-        "type": "int-or-empty",
+        "type": "int-or-auto",
+        "auto": "AUTO",
         "min": 100000
       }
     }

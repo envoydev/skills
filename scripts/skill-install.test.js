@@ -812,6 +812,7 @@ test('ps1 wiring: a retired hook is unwired from EVERY event, same as the sh twi
             "$SecretDeny = @('Read(./.env)')",
             "$Mcps = @('context7|-- x')",
             psArray(src, 'RetiredHooks'),
+            psFunc(src, 'Clear-WriteBlockers'),   // Write-JsonFile's dependency - extract both or the write is a no-op
             psFunc(src, 'Write-JsonFile'),
             psFunc(src, 'Set-HookSettings'),
             'Set-HookSettings',
@@ -847,7 +848,7 @@ test('sh env: both fresh-session knobs are seeded, and a hand-edited value is ne
         assert.strictEqual(wire(fresh).status, 0);
         const env = JSON.parse(fs.readFileSync(fresh, 'utf8')).env;
         assert.strictEqual(env.CLAUDE_STACK_FRESH_SESSION_PCT, '40', 'the gate percentage is seeded at the house default');
-        assert.strictEqual(env.CLAUDE_STACK_CONTEXT_WINDOW, '', 'the window box is seeded EMPTY - empty means auto-detect');
+        assert.strictEqual(env.CLAUDE_STACK_CONTEXT_WINDOW, 'AUTO', 'the window box is seeded with the AUTO sentinel, not an empty box');
         assert.strictEqual(env.CLAUDE_STACK_DOCS_PATH, '.claude/docs', 'the existing three are untouched');
 
         // update over a hand-edited install: absent-only, so both stay exactly as the user left them
@@ -864,8 +865,16 @@ test('sh env: both fresh-session knobs are seeded, and a hand-edited value is ne
         const stale = path.join(work, 'stale.json');
         fs.writeFileSync(stale, JSON.stringify({ env: { CLAUDE_STACK_CONTEXT_WINDOW: '1000000' } }));
         assert.strictEqual(wire(stale).status, 0);
-        assert.strictEqual(JSON.parse(fs.readFileSync(stale, 'utf8')).env.CLAUDE_STACK_CONTEXT_WINDOW, '',
-            'the old seed is cleared back to auto-detect');
+        assert.strictEqual(JSON.parse(fs.readFileSync(stale, 'utf8')).env.CLAUDE_STACK_CONTEXT_WINDOW, 'AUTO',
+            'the old seed is reset to auto-detect');
+
+        // ...and so is the EMPTY seed that replaced it: same behaviour, but an empty box in the env
+        // block reads as a variable nobody filled in rather than as the answer.
+        const blank = path.join(work, 'blank.json');
+        fs.writeFileSync(blank, JSON.stringify({ env: { CLAUDE_STACK_CONTEXT_WINDOW: '' } }));
+        assert.strictEqual(wire(blank).status, 0);
+        assert.strictEqual(JSON.parse(fs.readFileSync(blank, 'utf8')).env.CLAUDE_STACK_CONTEXT_WINDOW, 'AUTO',
+            'the empty seed becomes the AUTO sentinel');
     }
     finally { fs.rmSync(work, { recursive: true, force: true }); }
 });
@@ -886,6 +895,7 @@ test('ps1 env: the same two knobs, same rule (pwsh required)', { skip: skipNoPws
             "$SecretDeny = @('Read(./.env)')",
             "$Mcps = @('context7|-- x')",
             psArray(src, 'RetiredHooks'),
+            psFunc(src, 'Clear-WriteBlockers'),   // Write-JsonFile's dependency - extract both or the write is a no-op
             psFunc(src, 'Write-JsonFile'),
             psFunc(src, 'Set-HookSettings'),
             'Set-HookSettings',
@@ -898,11 +908,11 @@ test('ps1 env: the same two knobs, same rule (pwsh required)', { skip: skipNoPws
         assert.strictEqual(res.status, 0, res.stderr);
         const first = JSON.parse(fs.readFileSync(pass1, 'utf8')).env;
         assert.strictEqual(first.CLAUDE_STACK_FRESH_SESSION_PCT, '60', 'the hand-edited percentage is left alone');
-        assert.strictEqual(first.CLAUDE_STACK_CONTEXT_WINDOW, '', 'the absent window is seeded EMPTY - empty means auto-detect');
+        assert.strictEqual(first.CLAUDE_STACK_CONTEXT_WINDOW, 'AUTO', 'the absent window is seeded with the AUTO sentinel');
         const env = JSON.parse(fs.readFileSync(settings, 'utf8')).env;
         assert.strictEqual(env.CLAUDE_STACK_INSTRUMENT, '0', 'the existing seeds still land');
         // the first pass proved the absent-only seeds; this is the retired value being cleared
-        assert.strictEqual(env.CLAUDE_STACK_CONTEXT_WINDOW, '', 'the retired 1000000 seed is cleared back to auto-detect');
+        assert.strictEqual(env.CLAUDE_STACK_CONTEXT_WINDOW, 'AUTO', 'the retired 1000000 seed is reset to the AUTO sentinel');
         assert.strictEqual(env.CLAUDE_STACK_FRESH_SESSION_PCT, '40', 'and the percentage is re-seeded at the house default');
     }
     finally { fs.rmSync(repo, { recursive: true, force: true }); }
@@ -958,6 +968,7 @@ test('ps1 env: the same rename, same rules (pwsh required)', { skip: skipNoPwsh 
             "$SecretDeny = @('Read(./.env)')",
             "$Mcps = @('context7|-- x')",
             psArray(src, 'RetiredHooks'),
+            psFunc(src, 'Clear-WriteBlockers'),   // Write-JsonFile's dependency - extract both or the write is a no-op
             psFunc(src, 'Write-JsonFile'),
             psFunc(src, 'Set-HookSettings'),
             'Set-HookSettings',

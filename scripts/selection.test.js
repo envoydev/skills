@@ -181,6 +181,79 @@ test('ps1: -InstalledOnly derives the same plan as the sh twin (pwsh required)',
     finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
+// --- the nothing-installed guard, and the Windows Hidden attribute ---------
+// Two ways the fast path turned into a silently stamped no-op update.
+//
+// (1) The guard was dead in BOTH twins: it tested the selection file for ANY line, but the plugin
+// fallback directly above it appends one per manifest plugin unconditionally, so a derivation that
+// found zero skills, agents, rules and hooks still carried lines and the run continued. It now
+// tests the FILE layers only - plugins are machine-level and mcps come from .mcp.json; neither is
+// evidence that THIS target has an install.
+
+function makeEmptyInstallSandbox()
+{
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'io-empty-'));
+    for (const d of ['skills', 'agents', 'rules', 'hooks']) fs.mkdirSync(path.join(root, '.claude', d), { recursive: true });
+    fs.writeFileSync(path.join(root, '.mcp.json'), '{"mcpServers":{"serena":{}}}');   // mcps alone are not an install
+    return root;
+}
+
+test('sh: --installed-only over an empty .claude fails loudly instead of refreshing nothing', () => {
+    const root = makeEmptyInstallSandbox();
+    try
+    {
+        const res = spawnSync('bash', [SH, 'update', '--scope', 'project', '--installed-only', '--print-plan'],
+            { encoding: 'utf8', cwd: root });
+        assert.notStrictEqual(res.status, 0, 'the run must not continue to a stamped no-op');
+        assert.match(res.stderr, /found nothing installed/);
+    }
+    finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test('ps1: the same guard, same fixture (pwsh required)', { skip: hasPwsh ? false : 'pwsh not installed - ps1 behavioral test skipped' }, () => {
+    const root = makeEmptyInstallSandbox();
+    try
+    {
+        const res = spawnSync('pwsh', ['-NoProfile', '-File', PS1, 'update', '-Scope', 'project', '-InstalledOnly', '-PrintPlan'],
+            { encoding: 'utf8', cwd: root });
+        assert.notStrictEqual(res.status, 0, 'the run must not continue to a stamped no-op');
+        assert.match(res.stdout + res.stderr, /found nothing installed/);
+    }
+    finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+// (2) Windows-only until now: Get-ChildItem OMITS anything carrying the Hidden attribute unless
+// -Force is passed, so a `.claude` tree that had picked one up derived to zero of every file layer
+// and the update reported '0 refreshed' over unchanged files. Reproducible wherever .NET can
+// actually SET that attribute on a non-dot name - Windows, and macOS via UF_HIDDEN; on Linux the
+// attribute does not exist, so the setup step is checked and the test skips itself.
+function hideForPwsh(paths)
+{
+    const ps = paths.map((p) => `$i = Get-Item -LiteralPath ${JSON.stringify(p)} -Force; $i.Attributes = $i.Attributes -bor [System.IO.FileAttributes]::Hidden`).join('\n');
+    const check = `$hidden = @(${paths.map((p) => JSON.stringify(p)).join(',')}) | Where-Object { (Get-Item -LiteralPath $_ -Force).Attributes -band [System.IO.FileAttributes]::Hidden }; Write-Output $hidden.Count`;
+    const res = spawnSync('pwsh', ['-NoProfile', '-Command', ps + '\n' + check], { encoding: 'utf8' });
+    return res.status === 0 && res.stdout.trim() === String(paths.length);
+}
+
+test('ps1: -InstalledOnly still sees a .claude tree marked Hidden (pwsh required)', { skip: hasPwsh ? false : 'pwsh not installed - ps1 behavioral test skipped' }, () => {
+    const root = makeInstallSandbox();
+    try
+    {
+        const targets = [
+            path.join(root, '.claude/skills/csharp'),
+            path.join(root, '.claude/rules/csharp-conventions.md'),
+            path.join(root, '.claude/hooks/guard-catastrophic-rm.js'),
+        ];
+        if (!hideForPwsh(targets)) { console.log('    (skipped: this platform cannot set the Hidden attribute)'); return; }
+        const out = execFileSync('pwsh', ['-NoProfile', '-File', PS1, 'update', '-Scope', 'project', '-InstalledOnly', '-PrintPlan'],
+            { encoding: 'utf8', cwd: root });
+        assert.ok(planLine(out, 'skills').includes('csharp'), 'a Hidden skill dir is still derived');
+        assert.ok(planLine(out, 'rules').includes('csharp-conventions'), 'a Hidden rule is still derived');
+        assert.deepStrictEqual(planLine(out, 'hooks'), ['guard-catastrophic-rm'], 'a Hidden hook is still derived');
+    }
+    finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
 // --- the environment catalog (meta/environment.json) ------------------------------------------
 // One list for the settings.json env block: setup asks its rows, configure changes them, validate
 // reconciles them, the installers seed them. The lint pins catalog <-> installer parity; these
@@ -188,7 +261,7 @@ test('ps1: -InstalledOnly derives the same plan as the sh twin (pwsh required)',
 test('environment catalog: every row is askable, seeded and shaped', () =>
 {
     const cat = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'meta', 'environment.json'), 'utf8'));
-    const TYPES = new Set(['percent', 'enum', 'relative-path', 'int-or-empty']);
+    const TYPES = new Set(['percent', 'enum', 'relative-path', 'int-or-auto']);
     assert.ok(cat.env.length >= 5, 'the catalog carries the stack env values');
     for (const row of cat.env)
     {
