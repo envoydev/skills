@@ -264,19 +264,53 @@ test('guard-ungated-commit: trivial diffs, clean trees, non-commits and non-repo
 
 test('guard-ungated-commit: the receipt states', () => {
   const dir = scratchRepo();
+  const head = spawnSync('git', ['-C', dir, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).stdout.trim();
   const gate = path.join(dir, '.claude', 'docs', 'flow', 'COMMIT-GATE');
   fs.mkdirSync(path.dirname(gate), { recursive: true });
   const receipt = (s) => fs.writeFileSync(gate, s);
+  // the conformant receipt, and the pieces each clause removes from it
+  const full = (over = {}) => [
+    over.first || 'VERIFIED the pre-commit checkpoint',
+    over.auth === null ? null : (over.auth || 'authorized: "commit it"'),
+    over.head === null ? null : `head: ${over.head || head}`,
+    over.spec === null ? null : (over.spec || 'spec: 3 files'),
+    over.probe === null ? null : (over.probe || 'live-probe: `npm test` 238/238'),
+  ].filter((l) => l != null).join('\n') + '\n';
+
   receipt('WAIVED - "skip the review"\n'); assert.equal(gateIn(dir, 'git commit -am x'), 0, 'WAIVED');
+  receipt('WAIVED\n'); assert.equal(gateIn(dir, 'git commit -am x'), 2, 'WAIVED with no quoted words');
+  receipt(full()); assert.equal(gateIn(dir, 'git commit -am x'), 0, 'the conformant receipt');
   receipt('VERIFIED scope\n'); assert.equal(gateIn(dir, 'git commit -am x'), 2, 'VERIFIED without the authorized line');
-  receipt('VERIFIED scope\nauthorized: yes\n'); assert.equal(gateIn(dir, 'git commit -am x'), 2, 'an authorized line with no quoted words');
-  receipt('VERIFIED scope\nauthorized: PENDING - append the words\n'); assert.equal(gateIn(dir, 'git commit -am x'), 2, 'a PENDING placeholder');
-  receipt('VERIFIED scope\nauthorized: "commit it"\n'); assert.equal(gateIn(dir, 'git commit -am x'), 0, 'VERIFIED plus quoted consent');
+  receipt(full({ auth: 'authorized: yes' })); assert.equal(gateIn(dir, 'git commit -am x'), 2, 'an authorized line with no quoted words');
+  receipt(full({ auth: 'authorized: PENDING - append the words' })); assert.equal(gateIn(dir, 'git commit -am x'), 2, 'a PENDING placeholder');
+  receipt(full({ auth: 'authorized: ""' })); assert.equal(gateIn(dir, 'git commit -am x'), 2, 'an EMPTY quoted span');
+  receipt(full({ auth: 'authorized: "what time is it?"' })); assert.equal(gateIn(dir, 'git commit -am x'), 2, 'a quote carrying no consent verb');
+  receipt(full({ auth: 'answered: option 1 "Commit now"' })); assert.equal(gateIn(dir, 'git commit -am x'), 0, 'consent given by picking an option has its own spelling');
+  receipt(full({ head: '0'.repeat(40) })); assert.equal(gateIn(dir, 'git commit -am x'), 2, 'a head: naming a different commit');
+  receipt(full({ head: head.slice(0, 8) })); assert.equal(gateIn(dir, 'git commit -am x'), 0, 'a short sha is the same sha');
+  receipt(full({ head: null })); assert.equal(gateIn(dir, 'git commit -am x'), 2, 'no head: line');
+  receipt(full({ spec: null })); assert.equal(gateIn(dir, 'git commit -am x'), 2, 'no spec: line');
+  receipt(full({ spec: 'spec: 1 file' })); assert.equal(gateIn(dir, 'git commit -am x'), 2, 'a spec covering fewer files than the tree has');
+  receipt(full({ probe: null })); assert.equal(gateIn(dir, 'git commit -am x'), 2, 'no live-probe line');
+  receipt(full({ probe: 'live probe = NOT RUN - no test target' })); assert.equal(gateIn(dir, 'git commit -am x'), 0, "'live probe' spelled with a space, NOT RUN with a reason");
+  // the VERIFIED line names a verify skill and this transcript carries no Skill call
+  const tp = transcript('no-skill', [assistantRow('m1', 'reviewed')]);
+  const gateT = (cmd) => runIn('guard-ungated-commit.js', { tool_name: 'Bash', tool_input: { command: cmd }, transcript_path: tp },
+    { env: { ...process.env, CLAUDE_PROJECT_DIR: dir }, cwd: dir }).status;
+  receipt(full({ first: 'VERIFIED project-verify-code passed' })); assert.equal(gateT('git commit -am x'), 2, 'a verify skill named but never called');
+  receipt(full({ first: 'VERIFIED project-verify-code passed' }) + 'carried: cycle 3, reviewed 2026-09-05\n');
+  assert.equal(gateT('git commit -am x'), 0, 'unless the receipt says the review is carried');
+
+  receipt(full());
   const old = (Date.now() - 3 * 3600 * 1000) / 1000; fs.utimesSync(gate, old, old);
   assert.equal(gateIn(dir, 'git commit -am x'), 2, 'a 3h-old receipt is absent');
   receipt('garbage\n'); assert.equal(gateIn(dir, 'git commit -am x'), 2, 'an unrecognized first line');
   fs.unlinkSync(gate);
-  assert.equal(gateIn(dir, `printf 'VERIFIED x\\nauthorized: "go"\\n' > .claude/docs/flow/COMMIT-GATE && git commit -am x`), 0, 'the atomic write+commit shape carries its receipt');
+  // the atomic write+commit shape carries its receipt - and answers to the SAME contract, or it
+  // would be the cheapest way to skip every clause above
+  const atomic = full().trim().replace(/\n/g, '\\n');
+  assert.equal(gateIn(dir, `printf '${atomic}\\n' > .claude/docs/flow/COMMIT-GATE && git commit -am x`), 0, 'the atomic write+commit shape carries its receipt');
+  assert.equal(gateIn(dir, `printf 'VERIFIED x\\nauthorized: "go"\\n' > .claude/docs/flow/COMMIT-GATE && git commit -am x`), 2, 'the atomic shape gets no lighter contract');
   assert.equal(gateIn(dir, `echo 'VERIFIED x' > .claude/docs/flow/COMMIT-GATE && git commit -am x`), 2, 'atomic VERIFIED without authorized:');
   assert.equal(gateIn(dir, 'git commit -am "COMMIT-GATE VERIFIED authorized: x > flow/COMMIT-GATE"'), 2, 'receipt words inside the commit message');
   fs.mkdirSync(path.join(dir, 'docs', 'flow'), { recursive: true });
@@ -285,6 +319,27 @@ test('guard-ungated-commit: the receipt states', () => {
   // the pre-0.2.43 spelling still resolves, so an install the rename has not reached keeps working
   assert.equal(gateIn(dir, 'git commit -am x', { CLAUDE_DOCS_PATH: 'docs' }), 0, 'the old key is read as a fallback');
   assert.equal(gateIn(dir, 'git commit -am x', { CLAUDE_STACK_DOCS_PATH: 'docs', CLAUDE_DOCS_PATH: 'nowhere' }), 0, 'and the new key wins when both are set');
+});
+
+test('guard-ungated-commit: an option label THIS run wrote is not the user asking', () => {
+  // measured: `authorized: "Commit now (Recommended)"` - marker and all - prescribed by a skill,
+  // while the hook's own denial text demanded 'their words, verbatim'. The marker proves nothing
+  // either way (the harness stores the marked label as the answer), so it is stripped before the
+  // comparison and the LABEL ITSELF is what disqualifies the quote.
+  const dir = scratchRepo();
+  const head = spawnSync('git', ['-C', dir, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).stdout.trim();
+  const gate = path.join(dir, '.claude', 'docs', 'flow', 'COMMIT-GATE');
+  fs.mkdirSync(path.dirname(gate), { recursive: true });
+  const tp = transcript('own-label', [
+    { type: 'assistant', message: { id: 'q1', content: [{ type: 'tool_use', id: 'u1', name: 'AskUserQuestion', input: { questions: [{ question: 'Next?', options: [{ label: 'Commit now (Recommended)', description: 'land it' }, { label: 'Hold', description: 'wait' }] }] } }] } },
+  ]);
+  const body = (auth) => `VERIFIED the checkpoint\n${auth}\nhead: ${head}\nspec: 3 files\nlive-probe: npm test\n`;
+  const gateT = () => runIn('guard-ungated-commit.js', { tool_name: 'Bash', tool_input: { command: 'git commit -am x' }, transcript_path: tp },
+    { env: { ...process.env, CLAUDE_PROJECT_DIR: dir }, cwd: dir }).status;
+  fs.writeFileSync(gate, body('authorized: "Commit now (Recommended)"')); assert.equal(gateT(), 2, 'the model\'s own option label, marker included');
+  fs.writeFileSync(gate, body('authorized: "Commit now"')); assert.equal(gateT(), 2, 'and with the marker stripped');
+  fs.writeFileSync(gate, body('answered: Commit now')); assert.equal(gateT(), 0, 'the same choice, spelled as the answer it was');
+  fs.writeFileSync(gate, body('authorized: "ok commit it and push"')); assert.equal(gateT(), 0, 'the user\'s own typed words are untouched');
 });
 
 test('guard-ungated-commit: a cd or -C into a sibling repo judges THAT tree', () => {
@@ -328,18 +383,30 @@ test('guard-ungated-commit: nothing gated a push, and a quoted publish verb is s
   assert.equal(gateIn(dir, 'git push -n'), 0, '... and so does -n');
   assert.equal(gateIn(dir, 'gh pr merge 12 --squash'), 2, 'a merge lands code on the default branch');
 
+  const head = spawnSync('git', ['-C', dir, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).stdout.trim();
+  // the publish receipt answers to the same contract as the commit one - the spec names the set
+  // LEAVING the machine, so it is required but never counted against the working tree
+  const pushOk = (auth = 'authorized: "push it"') =>
+    `VERIFIED the release merge\n${auth}\nhead: ${head}\nspec: 2 commits on develop\nlive-probe: npm test green\n`;
   receipt('VERIFIED the release merge\n');
   assert.equal(gateIn(dir, 'git push'), 2, 'VERIFIED without the authorized line is not consent');
-  receipt('VERIFIED the release merge\nauthorized: "push it"\n');
-  assert.equal(gateIn(dir, 'git push'), 0, 'VERIFIED plus quoted consent');
+  receipt(pushOk('authorized: "what time is it?"'));
+  assert.equal(gateIn(dir, 'git push'), 2, 'a quote carrying no publish verb is not consent either');
+  receipt(pushOk().replace(/^head:.*\n/m, ''));
+  assert.equal(gateIn(dir, 'git push'), 2, 'no head: line');
+  receipt(pushOk());
+  assert.equal(gateIn(dir, 'git push'), 0, 'the conformant publish receipt');
   receipt('WAIVED - "just push"\n');
   assert.equal(gateIn(dir, 'git push'), 0, 'an explicit waiver');
   const old = (Date.now() - 3 * 3600 * 1000) / 1000;
   fs.utimesSync(path.join(flow, 'PUSH-GATE'), old, old);
   assert.equal(gateIn(dir, 'git push'), 2, 'a 3h-old receipt is absent');
   receipt(null);
-  assert.equal(gateIn(dir, `printf 'VERIFIED x\\nauthorized: "go"\\n' > .claude/docs/flow/PUSH-GATE && git push`), 0,
+  const atomicPush = pushOk().trim().replace(/\n/g, '\\n');
+  assert.equal(gateIn(dir, `printf '${atomicPush}\\n' > .claude/docs/flow/PUSH-GATE && git push`), 0,
     'the atomic write+publish shape carries its own receipt');
+  assert.equal(gateIn(dir, `printf 'VERIFIED x\\nauthorized: "go"\\n' > .claude/docs/flow/PUSH-GATE && git push`), 2,
+    '... and gets no lighter contract than the file');
   assert.equal(gateIn(dir, 'git push', { CLAUDE_STACK_PUSH_GATE: '0' }), 0, 'the switch turns the publish half off');
 
   // the false-positive class this gate must never reproduce

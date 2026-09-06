@@ -51,14 +51,28 @@ commit is a red CI run and a fixup commit (measured). A quality-loop stage-bound
 exceed the one-logical-change size guidance when its stages share touched files - name the stages
 in the commit body rather than splitting an unverifiable diff.
 
-The checkpoint ends by writing its receipt: `<docs-path>/flow/COMMIT-GATE`, first line
-`VERIFIED <what was reviewed, one phrase>` when the gates passed (the quality-loop and
-cross-task gate exemptions count as VERIFIED - name the loop or gate), second line
-`authorized: "<the user's words asking for THIS commit, verbatim>"` - the VERIFIED line proves
-the review ran, the authorized line proves the user asked (measured: a self-written VERIFIED
-receipt once cleared a commit no user had requested); or `WAIVED - "<the user's words,
-verbatim>"` only
-on their explicit waiver - 'commit it' is an instruction to commit, never a waiver of the review.
+The checkpoint ends by writing its receipt: `<docs-path>/flow/COMMIT-GATE`, five lines -
+
+```
+VERIFIED <what was reviewed, one phrase>
+authorized: "<the user's words asking for THIS commit, verbatim>"
+head: <the sha the review ran against>
+spec: <N files - the set it covered>
+live-probe: <what was actually run, or NOT RUN - <reason>>
+```
+
+(the quality-loop and cross-task gate exemptions count as VERIFIED - name the loop or gate); or
+`WAIVED - "<the user's words, verbatim>"` alone on their explicit waiver - 'commit it' is an
+instruction to commit, never a waiver of the review. Each line answers a way the receipt was
+measured passing while recording nothing: the VERIFIED line proves the review ran, `authorized:`
+proves the user asked (a self-written VERIFIED receipt once cleared a commit no user had
+requested), `head:` proves it reviewed THIS tree, `spec:` proves it covered the whole diff (one
+receipt asserted a 17-file review in which 9 files had been read) and `live-probe:` proves it ran
+the thing (one asserted a passing review with no build or test output at all). The quoted words
+must carry a commit verb - `authorized: "what time is it?"` used to pass - and must not be an
+option label this run wrote: consent given by picking an option is spelled `answered: <the chosen
+label>` instead, which is a different claim and reads as one. A review carried from an earlier
+cycle says so: `carried: <cycle id>, reviewed <date>`.
 Write the receipt as its OWN tool call, before the call that runs `git commit` - the enforcing
 hook checks the file at commit time, so a receipt written inside the same compound command is
 invisible to a stricter gate and unauditable in the ledger. The shipped hook still ACCEPTS the atomic
@@ -83,9 +97,11 @@ git verb - the run recommended a route the stack bans.
 
 **Publishing has the same ceremony.** `git push` and `gh pr merge` are where the work leaves this
 machine - other people and CI get it, and a shared branch cannot be un-pushed quietly - so they
-carry their own receipt, `<docs-path>/flow/PUSH-GATE`, in the SAME shape: `VERIFIED <what is being
-published, one phrase>` plus `authorized: "<the user's words asking for THIS publish, verbatim>"`,
-or `WAIVED - "<their words>"`. Say what is going out and to which branch, get the answer, write the
+carry their own receipt, `<docs-path>/flow/PUSH-GATE`, in the SAME five-line shape - `VERIFIED
+<what is being published, one phrase>`, `authorized: "<the user's words asking for THIS publish,
+verbatim>"`, `head:`, `spec: <the commit set going out>` and `live-probe:` - or `WAIVED - "<their
+words>"`. Only the spec differs in kind: a publish's spec names what LEAVES the machine, not what
+is uncommitted here, so it is required and never counted against the working tree. Say what is going out and to which branch, get the answer, write the
 receipt as its own call, publish, clear it. `guard-ungated-commit` enforces this half too (measured:
 across four audited sessions every push and merge passed every guard - one published unpushed
 commits 18 minutes before any receipt existed, another put 40 files on a shared `develop`). A push

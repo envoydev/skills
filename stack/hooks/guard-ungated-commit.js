@@ -156,40 +156,195 @@ const rawOf = (m) => (m && !m.opaque ? command.substr(m.index, m[0].length) : (m
 const dashC = rawOf(publishMatch || commitMatch).match(/\s-C\s*("[^"]+"|'[^']+'|\S+)/);
 if (dashC) root = path.resolve(root, nativePath(unq(dashC[1])));
 const git = (args) => execSync(`git ${args}`, { cwd: root, timeout: 5000 }).toString().trim();
+// The files this act would commit. The stack's own docs root is excluded: the receipt is written
+// INTO it moments before the act, so counting it inflated both the trivial-diff bar and the spec
+// check - a conformant `spec: 3 files` read as covering 3 of 4 because the fourth was the receipt.
+const docsPrefix = () => {
+  const d = docsRootEnv().replace(/\\/g, '/').replace(/^\.\//, '').replace(/\/+$/, '');
+  return d && !path.isAbsolute(d) ? `${d}/` : null;
+};
+function changedFiles() {
+  const pre = docsPrefix();
+  const keep = (f) => f && !(pre && f.replace(/\\/g, '/').startsWith(pre));
+  const tracked = git('diff HEAD --name-only').split('\n').filter(keep);
+  const untracked = git('ls-files --others --exclude-standard').split('\n').filter(keep);
+  return { tracked, untracked, count: tracked.length + untracked.length };
+}
 
 const docsRoot = docsRootEnv();
 const MAX_RECEIPT_AGE_MS = 2 * 60 * 60 * 1000; // 2h - the gate runs right before the act; re-stamping is one Write
-// WAIVED carries the user's words on its own line; VERIFIED needs the authorized: second
-// line - a review receipt alone is not consent (measured: a self-written VERIFIED receipt
-// once cleared a commit no user had requested). The authorized: line must carry the user's
-// actual quoted words: a two-stage receipt's draft placeholder ('authorized: PENDING -
-// append...') matches the bare prefix, so a prefix check silently accepted a receipt that
-// records no consent (measured: a PENDING draft sat gate-passing for ~2 minutes).
+// The RECEIPT CONTRACT. Every clause here was bought with a receipt that passed the gate and
+// recorded nothing: `authorized: "what time is it?"` exit 0, `authorized: ""` exit 0 - the only
+// discriminator the first version applied was the presence of a quote character.
+//   auth   - the quoted span must be non-empty AND carry a consent verb. A question, a filename or
+//            an empty pair of quotes is not somebody asking for this commit.
+//   label  - a span CHARACTER-IDENTICAL to an option label in this transcript is the MODEL's own
+//            words, not the user's (measured: `authorized: "Commit now (Recommended)"`, marker and
+//            all, prescribed by a skill while the denial text demanded 'their words, verbatim').
+//            Consent given by picking an option has its own spelling: `answered: <label>`.
+//   head   - the review covered a TREE. Without the sha, a receipt written before three more edits
+//            landed still reads as this diff's review.
+//   spec   - and it covered a SET of files: one measured receipt asserted a review of a 17-file diff
+//            in which 9 files had been read.
+//   probe  - a VERIFIED line that names a review must carry its live-probe result: one receipt
+//            asserted a passing review with no build/test output and no probe at all. Spelled
+//            case-insensitively with an optional hyphen or space - `live probe = ...` is conformant.
+//   carried- a stamp minted from a carried resume block says so, or the freshness check is
+//            silently satisfied by a re-mint of a 9h30m-old answer.
+// A PENDING draft placeholder matches the bare prefix, so the prefix alone is never the test
+// (measured: a PENDING draft sat gate-passing for ~2 minutes).
+const CONSENT_VERB = /\b(commit|commits|committing|push|pushes|pushing|land|lands|landing|ship|ships|shipping|merge|merges|merging|publish|publishes|publishing|release|releases|releasing|go ahead|do it|approve[ds]?|yes)\b/i;
+const CONSENT_VERB_CYR = /(коміт|комміт|закоміт|запуш|пуш|залив|злий|мерж|злит|відправ|отправ|випуст|выпуст|дава[йй]|погоджу|согласен|схвал|так, |да, )/i;
+const QUOTED = /["'“‘”’]([^"'“‘”’]*)["'“‘”’]/;
+
+// The transcript tail, read once and shared by the two checks that need it. 256KB is the same
+// window every other guard reads; a receipt is minted within a turn or two of its evidence.
+let _tail;
+function tail() {
+  if (_tail !== undefined) return _tail;
+  _tail = '';
+  try {
+    const tp = payload.transcript_path;
+    if (tp) {
+      const size = fs.statSync(tp).size;
+      const start = Math.max(0, size - 256 * 1024);
+      const fd = fs.openSync(tp, 'r');
+      const buf = Buffer.alloc(size - start);
+      fs.readSync(fd, buf, 0, buf.length, start);
+      fs.closeSync(fd);
+      _tail = buf.toString('utf8');
+    }
+  } catch { _tail = ''; }
+  return _tail;
+}
+// Is this exact string one of the assistant's own AskUserQuestion option labels? Compared with the
+// `(Recommended)` marker STRIPPED, because the harness stores the marked label as the user's answer
+// (correction 3) - so the marker's presence proves nothing either way.
+function isOwnOptionLabel(span) {
+  const norm = (t) => String(t).replace(/\s*\(recommended\)\s*$/i, '').trim().toLowerCase();
+  const want = norm(span);
+  if (!want) return false;
+  for (const m of tail().matchAll(/"label"\s*:\s*"((?:[^"\\]|\\.)*)"/g)) {
+    let lbl;
+    try { lbl = JSON.parse(`"${m[1]}"`); } catch { lbl = m[1]; }
+    if (norm(lbl) === want) return true;
+  }
+  return false;
+}
+const skillCallRan = () => /"name"\s*:\s*"Skill"/.test(tail());
+
+// One judge, two routes. The receipt written as its own file and the receipt written inside the
+// same command as the act are the SAME document, so they answer to the same contract - otherwise
+// the atomic shape (which this gate accepts by design) is a hole straight through every clause.
+function judgeReceipt(body, opts) {
+  // A receipt written through `printf` carries LITERAL backslash-n, not newlines.
+  const text = String(body).replace(/\\n/g, '\n');
+  // The verdict token, and the rest of ITS line. Anchoring to the start of a line read the atomic
+  // shape as having no verdict at all, because there the line begins `printf 'VERIFIED ...`.
+  const first = ((/\b(VERIFIED|WAIVED)\b[^\n]*/i.exec(text) || [''])[0]).trim();
+  // Fields are read by PREFIX from any line, not by line number: a receipt that carries its
+  // head/spec lines in a different order is still a conformant receipt.
+  const field = (key) => {
+    const m = new RegExp(`^\\s*${key}\\s*:?[ \\t]*(.*)$`, 'im').exec(text);
+    return m ? m[1].trim() : null;
+  };
+  const waived = /^WAIVED\b/.test(first);
+  const verified = /^VERIFIED\b/.test(first);
+  const r = { waived, verified, problem: null };
+  if (!waived && !verified) return r;
+  const bodyText = text;
+
+  const quotedOf = (line) => {
+    if (line == null) return null;
+    if (/\bPENDING\b/i.test(line)) return null;
+    const m = QUOTED.exec(line);
+    return m ? m[1].trim() : null;
+  };
+  const consents = (t) => CONSENT_VERB.test(t) || CONSENT_VERB_CYR.test(t);
+
+  if (waived) {
+    const w = quotedOf(first);
+    if (!w) r.problem = 'the WAIVED line carries no quoted words - a waiver is the user\'s own sentence, in quotes, on that line';
+    return r;
+  }
+
+  // --- VERIFIED: consent -------------------------------------------------------------------
+  const authorized = quotedOf(field('authorized'));
+  const answered = field('answered') || field('answer');
+  if (authorized) {
+    if (!consents(authorized)) {
+      r.problem = `the authorized: quote (${JSON.stringify(authorized).slice(0, 60)}) carries no commit / push / land / ship verb - it records the user saying something, not the user asking for THIS act`;
+      return r;
+    }
+    if (isOwnOptionLabel(authorized)) {
+      r.problem = 'the authorized: quote is character-identical to an option label THIS run wrote - that is the model\'s sentence, not the user\'s. Consent given by picking an option is spelled `answered: <the chosen label>` instead';
+      return r;
+    }
+  } else if (answered) {
+    if (!answered.replace(/^option\s+\d+\s*/i, '').replace(/["'“‘”’]/g, '').trim()) {
+      r.problem = 'the answered: line names no option';
+      return r;
+    }
+  } else {
+    r.problem = 'no authorized: line carrying the user\'s quoted words, and no answered: line naming the option they picked';
+    return r;
+  }
+
+  // --- VERIFIED: what was reviewed ---------------------------------------------------------
+  const head = field('head');
+  if (!head) {
+    r.problem = 'no head: line - the review covered a TREE, and without its sha a receipt written before three more edits landed still reads as this diff\'s review';
+    return r;
+  }
+  let realHead = '';
+  try { realHead = git('rev-parse HEAD'); } catch { realHead = ''; }
+  const h = head.replace(/[^0-9a-fA-F]/g, '');
+  if (realHead && h && !realHead.startsWith(h) && !h.startsWith(realHead)) {
+    r.problem = `head: ${head} is not this repo's HEAD (${realHead.slice(0, 12)}) - the review ran against a different commit`;
+    return r;
+  }
+  const spec = field('spec');
+  if (!spec) {
+    r.problem = 'no spec: line naming the file set reviewed (measured: a receipt asserted a review of a 17-file diff in which 9 files had been read)';
+    return r;
+  }
+  // The count is compared against the working tree only for a COMMIT: a publish's spec names the
+  // commit set leaving the machine, which has nothing to do with what is uncommitted here.
+  const claimed = (opts && opts.countAgainstTree) ? /(\d+)\s*files?\b/i.exec(spec) : null;
+  if (claimed) {
+    let actual = 0;
+    try { actual = changedFiles().count; } catch { actual = 0; }
+    if (actual && Number(claimed[1]) < actual) {
+      r.problem = `spec: claims ${claimed[1]} file(s) but the tree has ${actual} uncommitted - review the rest, or narrow what this act commits`;
+      return r;
+    }
+  }
+  if (!/live[-\s]?probe/i.test(bodyText)) {
+    r.problem = 'no live-probe line - a VERIFIED review states what it actually ran, either the quoted output or `NOT RUN - <reason>` (spelled live-probe, live probe or live_probe)';
+    return r;
+  }
+  // A stamp minted from a CARRIED resume block must say so, or a 9h30m-old answer mints fresh
+  // consent in 45 seconds and defeats the freshness check.
+  if (/\b(project-)?verify-(code|plan)\b|\bquality-loop\b/i.test(first) && !skillCallRan() && !field('carried')) {
+    r.problem = `the VERIFIED line names a verify skill but no Skill call ran in this session - if this review is carried from an earlier cycle say so: \`carried: <cycle id>, reviewed <date>\``;
+    return r;
+  }
+  return r;
+}
+
 function readReceipt(name) {
   const gate = path.resolve(root, docsRoot, 'flow', name);
-  let first = '';
-  let second = '';
   let stale = false;
+  let body = '';
   try {
     const age = Date.now() - fs.statSync(gate).mtimeMs;
-    if (age > MAX_RECEIPT_AGE_MS) {
-      stale = true;
-    } else {
-      const lines = fs.readFileSync(gate, 'utf8').split('\n');
-      first = (lines[0] || '').trim();
-      second = (lines[1] || '').trim();
-    }
+    if (age > MAX_RECEIPT_AGE_MS) stale = true;
+    else body = fs.readFileSync(gate, 'utf8');
   } catch {
     // absent or unreadable - no gate receipt
   }
-  const authReal = /^authorized:/.test(second) && /["'“‘]/.test(second) && !/\bPENDING\b/i.test(second);
-  return {
-    gate,
-    stale,
-    waived: /^WAIVED\b/.test(first),
-    verified: /^VERIFIED\b/.test(first),
-    noAuth: /^VERIFIED\b/.test(first) && !authReal,
-  };
+  if (stale) return { gate, stale, waived: false, verified: false, problem: null };
+  return { gate, stale, ...judgeReceipt(body, { countAgainstTree: name === 'COMMIT-GATE' }) };
 }
 // An atomic write-receipt-then-act command carries its own receipt: the gate file is
 // written (with a VERIFIED/WAIVED line in the same command text) before git runs. Blocking
@@ -205,7 +360,10 @@ function carriesOwnReceipt(name, upto) {
   if (!pre.includes(name)) return false;
   const writes = new RegExp(`(?:>>?|\\btee\\s+(?:-a\\s+)?|\\bprintf\\b[^>]*>>?|\\bcat\\s*>>?)\\s*["']?(\\S*flow\\/${name})\\b`);
   if (!writes.test(pre)) return false;
-  return /\bWAIVED\b/.test(pre) || (/\bVERIFIED\b/.test(pre) && /authorized:/.test(pre));
+  // ...and it answers to the SAME contract as the file. Judging the atomic shape more leniently
+  // made it the cheapest way to skip every clause below: one printf and the gate was satisfied.
+  const j = judgeReceipt(pre, { countAgainstTree: name === 'COMMIT-GATE' });
+  return (j.waived || j.verified) && !j.problem;
 }
 
 // --- the PUBLISH gate ---------------------------------------------------------------------
@@ -224,12 +382,12 @@ if (publishMatch) {
   }
   if (!dryRun && ahead && !carriesOwnReceipt('PUSH-GATE', publishMatch.index)) {
     const r = readReceipt('PUSH-GATE');
-    if (!r.waived && !(r.verified && !r.noAuth)) {
+    if (!((r.waived || r.verified) && !r.problem)) {
       process.stderr.write(
         (r.stale
           ? `Blocked: ${act} - the publish receipt at ${r.gate} is older than 2h and is treated as absent (a stale receipt from an earlier round did not review THIS push).\n`
-          : r.noAuth
-            ? `Blocked: ${act} - the publish receipt at ${r.gate} has a VERIFIED first line but its 'authorized:' second line is missing, a PENDING placeholder, or carries no quoted words; nothing records the user asking for THIS publish.\n`
+          : r.problem
+            ? `Blocked: ${act} - the publish receipt at ${r.gate} does not hold: ${r.problem}.\n`
             : `Blocked: ${act} without the publish gate receipt.\n`) +
           `Pushing and merging are where the work leaves this machine - other people and CI get it,\n` +
           `and a shared branch cannot be un-pushed quietly. Measured across four sessions: every\n` +
@@ -237,10 +395,17 @@ if (publishMatch) {
           `and one running before any review receipt existed at all.\n\n` +
           `Say what is being published and to which branch, get the user's answer, then write\n` +
           `${r.gate}\n` +
-          `with one first line - VERIFIED <what is being published, one phrase> - and a second line\n` +
-          `authorized: "<the user's words asking for THIS publish, verbatim>". If they EXPLICITLY\n` +
-          `waived it this conversation, write WAIVED - "<their words, verbatim>" instead; never\n` +
-          `fabricate either quote. Then retry, and clear the file once it lands.\n` +
+          `with these lines:\n` +
+          `  VERIFIED <what is being published, one phrase>\n` +
+          `  authorized: "<the user's words asking for THIS publish, verbatim>"   (or, when they\n` +
+          `    picked an option instead of typing, answered: <the chosen label>)\n` +
+          `  head: <git rev-parse HEAD>\n` +
+          `  spec: <N files - the set this publish covers>\n` +
+          `  live-probe: <what you actually ran, or NOT RUN - <reason>>\n` +
+          `The quoted words must carry a publish verb and must not be an option label this run\n` +
+          `wrote. If they EXPLICITLY waived it this conversation, write WAIVED - "<their words,\n` +
+          `verbatim>" instead; never fabricate either quote. Then retry, and clear the file once\n` +
+          `it lands.\n` +
           `A repo whose remote is already gated (branch protection, a required review) can turn\n` +
           `this half off for good: CLAUDE_STACK_PUSH_GATE=0 in the settings.json env block.`,
       );
@@ -260,14 +425,15 @@ if (carriesOwnReceipt('COMMIT-GATE', commitMatch.index)) process.exit(0);
 // (reproduced: three 40-line new files, exit 0). An untracked file is one row and its line
 // count is its churn - the same arithmetic a staged add gets.
 try {
-  const numstat = git('diff HEAD --numstat');
-  const rows = numstat ? numstat.split('\n') : [];
+  const pre = docsPrefix();
+  const rows = git('diff HEAD --numstat').split('\n')
+    .filter((r) => r && !(pre && (r.split('\t')[2] || '').replace(/\\/g, '/').startsWith(pre)));
   let files = rows.length;
   let lines = rows.reduce((n, r) => {
     const [a, d] = r.split('\t');
     return n + (parseInt(a, 10) || 0) + (parseInt(d, 10) || 0);
   }, 0);
-  for (const f of git('ls-files --others --exclude-standard').split('\n').filter(Boolean)) {
+  for (const f of changedFiles().untracked) {
     files += 1;
     if (files > 2) break; // already past the bar - no need to size the rest
     try { lines += fs.readFileSync(path.join(root, f), 'utf8').split('\n').filter(Boolean).length; } catch { /* unreadable - the row alone counts */ }
@@ -278,22 +444,28 @@ try {
   process.exit(0); // not a git repo / git unavailable - never block on our own failure
 }
 const c = readReceipt('COMMIT-GATE');
-if (c.waived) process.exit(0);
-if (c.verified && !c.noAuth) process.exit(0);
+if ((c.waived || c.verified) && !c.problem) process.exit(0);
 process.stderr.write(
   (c.stale
     ? `Blocked: git commit - the gate receipt at ${c.gate} is older than 2h and is treated as absent (a stale receipt from an earlier round is not this diff's review).\n`
-    : c.noAuth
-      ? `Blocked: git commit - the gate receipt at ${c.gate} has a VERIFIED first line but its 'authorized:' second line is missing, a PENDING placeholder, or carries no quoted words; the review ran, but nothing records the user asking for THIS commit. Append authorized: "<their words, verbatim>" and retry.\n`
+    : c.problem
+      ? `Blocked: git commit - the gate receipt at ${c.gate} does not hold: ${c.problem}.\n`
       : `Blocked: git commit on a non-trivial diff without the pre-commit gate receipt.\n`) +
     `The checkpoint (baseline-git.md) runs BEFORE a non-trivial commit: the formatter, then\n` +
     `the house review project-verify-code - plus /security-review when the diff touches\n` +
     `auth/crypto/secrets/payment/data-access paths (baseline-security.md). When those pass, write\n` +
     `${c.gate}\n` +
-    `with one first line - VERIFIED <what was reviewed, one phrase> - and a second line\n` +
-    `authorized: "<the user's words asking for THIS commit, verbatim>" (a receipt proves\n` +
-    `the review ran, the authorized line proves the user asked for the commit - measured: a\n` +
-    `self-written VERIFIED receipt once passed this gate on a commit no user requested).\n` +
+    `with these lines:\n` +
+    `  VERIFIED <what was reviewed, one phrase>\n` +
+    `  authorized: "<the user's words asking for THIS commit, verbatim>"   (or, when they picked\n` +
+    `    an option instead of typing, answered: <the chosen label>)\n` +
+    `  head: <git rev-parse HEAD>\n` +
+    `  spec: <N files - the set the review covered>\n` +
+    `  live-probe: <what you actually ran, or NOT RUN - <reason>>\n` +
+    `The VERIFIED line proves the review ran; the authorized line proves the user asked for the\n` +
+    `commit, and its quote must carry a commit verb and must not be an option label this run\n` +
+    `wrote (measured: a self-written VERIFIED receipt passed this gate on a commit no user\n` +
+    `requested, and 'authorized: "what time is it?"' passed it too).\n` +
     `Then retry the commit. If the user EXPLICITLY waived the gate this conversation, write\n` +
     `WAIVED - "<their words, verbatim>" instead; never fabricate either quote, and 'commit\n` +
     `it' alone is an instruction to commit, not a waiver of the review. Do not split a real\n` +
