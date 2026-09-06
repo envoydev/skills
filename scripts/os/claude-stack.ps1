@@ -1355,7 +1355,12 @@ function Write-Stamp {
     "action: $Action"
     "scope: $ClaudeScope"
   )
-  Set-Content -LiteralPath $dest -Value $lines -Encoding utf8
+  # LF + no BOM, byte-for-byte what the sh twin writes. Set-Content emits [Environment]::NewLine,
+  # so on Windows the same stamp came out CRLF - and a reader that splits on `\n` then anchors a
+  # `$` (the common shape) matches nothing, because JS counts `\r` as a line terminator. The stamp
+  # is the install's only record of the revision it came from; it must parse identically on every
+  # platform. (Set-Content -Encoding utf8 also prefixes a BOM on PS 5.1.)
+  [System.IO.File]::WriteAllText($dest, (($lines -join "`n") + "`n"), (New-Object System.Text.UTF8Encoding($false)))
   $shortSha = $script:StackSha.Substring(0, [Math]::Min(12, $script:StackSha.Length))
   Log "  stamp: $dest @ $shortSha"
 }

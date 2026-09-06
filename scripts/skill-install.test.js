@@ -43,11 +43,15 @@ function runSkillCopy(names, extraArgs = []) {
 }
 
 // Read the stamp's `key: value` lines (comment lines start with '#').
+// Split on `\r?\n`, not `\n`: a CRLF file leaves a trailing `\r` on every line, and JS counts
+// `\r` as a LINE TERMINATOR, so `.` cannot match it and the `$`-anchored pattern below matches
+// NOTHING. That is what a Windows-written stamp used to look like to this reader - every key
+// undefined - which read as 'the installer wrote no sha' when the stamp was on disk and correct.
 function readStamp(work) {
     const file = path.join(work, '.claude', 'claude-stack.stamp');
     if (!fs.existsSync(file)) return null;
     const stamp = {};
-    for (const line of fs.readFileSync(file, 'utf8').split('\n'))
+    for (const line of fs.readFileSync(file, 'utf8').split(/\r?\n/))
     {
         const m = /^([a-z]+):\s*(.*)$/.exec(line);
         if (m) stamp[m[1]] = m[2];
@@ -232,6 +236,12 @@ test('ps1: install stamps the source revision it installed from (pwsh required)'
         assert.ok(fs.existsSync(path.join(work, '.claude', 'skills', 'csharp', 'SKILL.md')), 'ps1 copied the selected skill');
         const mainTip = execFileSync('git', ['-C', SRC_REPO, 'rev-parse', 'main'], { encoding: 'utf8' }).trim();
         assert.strictEqual(readStamp(work).sha, mainTip, 'ps1 stamps the same release-branch sha the sh would');
+        // The twins must write the SAME BYTES: Set-Content emits [Environment]::NewLine, so this
+        // stamp came out CRLF on Windows and LF everywhere else. Only a Windows run can fail this
+        // assertion - which is exactly why it exists, now that the suite runs on windows-latest.
+        const raw = fs.readFileSync(path.join(work, '.claude', 'claude-stack.stamp'), 'utf8');
+        assert.ok(!raw.includes('\r'), 'the stamp is LF-terminated on every platform, like the sh twin');
+        assert.ok(!raw.startsWith('\uFEFF'), 'no BOM - a stamp is plain text, read by node and by the model');
     }
     finally
     {
