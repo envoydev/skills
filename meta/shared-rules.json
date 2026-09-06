@@ -3241,6 +3241,27 @@
           "marker": "or when that hook has already injected the ask into this turn"
         }
       ]
+    },
+    "next-step-ask-recommendation-first": {
+      "_note": "The guided commands' closing next-steps ask: a step the user must run or decide NOW ends the turn in ONE AskUserQuestion (prose next steps were ignored 3 of 3 in one session), and the question TEXT carries the recommendation - the step named plus the one reason it matters. A contentless 'What now?' over a list hands back the deciding the report was supposed to do, against the house recommendation-first rule. Four homes because each command runs standalone.",
+      "owner": {
+        "file": "setup-plugin/commands/update.md",
+        "marker": "never a contentless 'What now?' over a list"
+      },
+      "sites": [
+        {
+          "file": "setup-plugin/commands/setup.md",
+          "marker": "never a contentless 'What now?' over a list"
+        },
+        {
+          "file": "setup-plugin/commands/configure.md",
+          "marker": "never a contentless 'What now?' over a list"
+        },
+        {
+          "file": "setup-plugin/commands/validate.md",
+          "marker": "never a contentless 'What now?' over a list"
+        }
+      ]
     }
   }
 }
