@@ -1597,9 +1597,10 @@ function main()
         }
     }
 
-    // 29. guard-secret-value.js judges a key by meta/environment.json's `secret_key_pattern`; the
+    // 31. guard-secret-value.js judges a key by meta/environment.json's `secret_key_pattern`; the
     //     hook ships into projects without meta/, so it carries a copy - and the copy must be
     //     byte-identical, or a key the catalog calls secret is one the guard lets through.
+    try
     {
         const envCatalog = JSON.parse(fs.readFileSync(path.join(ROOT, 'meta', 'environment.json'), 'utf8'));
         const hookSrc = fs.readFileSync(path.join(ROOT, 'stack', 'hooks', 'guard-secret-value.js'), 'utf8');
@@ -1612,6 +1613,10 @@ function main()
         {
             flag(`guard-secret-value.js SECRET_KEY_SOURCE '${m[1]}' differs from meta/environment.json secret_key_pattern '${envCatalog.secret_key_pattern}'`);
         }
+    }
+    catch (err)
+    {
+        flag(`guard-secret-value.js / meta/environment.json parity check could not read its inputs: ${err.message}`);
     }
 
     // 24. The shared-rules registry (meta/shared-rules.json) - the sanctioned multi-home

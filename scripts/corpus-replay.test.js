@@ -28,7 +28,7 @@ const rowFor = (out, route) => (out.split('\n').find((l) => l.startsWith(`| ${ro
 test('corpus-replay: one Bash payload fans out to every Bash-wired guard', () => {
   const dir = corpus([toolRow('Bash', { command: 'ls -la' })]);
   const { out } = run(dir, '--extract-only');
-  for (const h of ['protected-force-push', 'catastrophic-rm', 'read-whole-file', 'ungated-commit', 'cross-project-write']) {
+  for (const h of ['protected-force-push', 'catastrophic-rm', 'read-whole-file', 'secret-value', 'ungated-commit', 'cross-project-write']) {
     assert.match(out, new RegExp(`guard-${h}\\.js::PreToolUse:Bash`), `${h} must see a Bash payload`);
   }
 });
