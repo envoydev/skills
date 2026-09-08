@@ -72,8 +72,12 @@ function secretKeyIn(node, prefix, depth) {
 }
 const DOTENV_LINE = /^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$/;
 const unquote = (v) => v.trim().replace(/^(["'])(.*)\1$/, '$2');
+// Lines split on CRLF as well as LF: DOTENV_LINE ends in `(.*)$` and `.` never crosses a line
+// terminator, so a Windows-authored .env split on `\n` alone matched NO line - a live key passed
+// and --presence reported every key absent (reproduced with a CRLF fixture).
+const LINES = /\r?\n/;
 function secretLineIn(text) {
-  for (const line of text.split('\n')) {
+  for (const line of text.split(LINES)) {
     const m = line.match(DOTENV_LINE);
     if (m && SECRET_KEY_RE.test(m[1]) && holdsCredential(m[1], unquote(m[2]))) return m[1];
   }
@@ -90,7 +94,7 @@ function secretIn(file) {
     text = fs.readFileSync(file, 'utf8').replace(/^\uFEFF/, '');
   } catch { return null; }
   try { return secretKeyIn(JSON.parse(text), '', 0); } catch { /* not JSON */ }
-  const first = text.split('\n').find((l) => l.trim() && !l.trim().startsWith('#')) || '';
+  const first = text.split(LINES).find((l) => l.trim() && !l.trim().startsWith('#')) || '';
   return DOTENV_LINE.test(first) ? secretLineIn(text) : null;
 }
 
@@ -237,7 +241,7 @@ if (process.argv[2] === '--presence') {
       const j = JSON.parse(text);
       entries = (j && typeof j.env === 'object' && j.env) ? j.env : (j && typeof j === 'object' && !Array.isArray(j) ? j : {});
     } catch {
-      for (const line of text.split('\n')) { const m = line.match(DOTENV_LINE); if (m) entries[m[1]] = unquote(m[2]); }
+      for (const line of text.split(LINES)) { const m = line.match(DOTENV_LINE); if (m) entries[m[1]] = unquote(m[2]); }
     }
   }
   const names = keys.length ? keys : Object.keys(entries).filter((k) => typeof entries[k] === 'string');

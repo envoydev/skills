@@ -55,6 +55,7 @@ function fixtures() {
     clean: w('clean-settings.json', JSON.stringify({ env: { CLAUDE_STACK_DOCS_PATH: '.claude/docs', CLAUDE_STACK_PUSH_GATE: '1' }, hooks: {} }, null, 2)),
     mcp: w('.mcp.json', JSON.stringify({ mcpServers: { context7: { env: { CONTEXT7_API_KEY: '${CONTEXT7_API_KEY}' } } } }, null, 2)),
     dotenv: w('.env', 'DB_HOST=localhost\nAPI_KEY=abc123\n'),
+    crlf: w('crlf.env', 'DB_HOST=localhost\r\nAPI_KEY=abc123\r\nSMTP_SECRET="changeme"\r\n'),
     emptyDotenv: w('empty.env', 'API_KEY=\nDB_HOST=localhost\n'),
     nested: w('appsettings.json', JSON.stringify({ ConnectionStrings: { Default: 'Server=x' }, Smtp: { Password: 'p@ss' } })),
     code: w('index.js', 'const TOKEN = process.env.TOKEN;\nmodule.exports = TOKEN;\n'),
@@ -259,6 +260,16 @@ test('guard-secret-value --presence: reports set (N chars) or absent, never a va
   assert.equal(missing.stdout, `# ${path.join(f.dir, 'nope.json')}: not found\nSENTRY_SLUG=absent\n`);
   const tilde = presence('~/.this-file-does-not-exist-guard-secret-value.json', 'X');
   assert.match(tilde.stdout, /^# .*\.this-file-does-not-exist-guard-secret-value\.json: not found\nX=absent\n$/, '~ is expanded');
+});
+
+test('guard-secret-value: a CRLF dotenv file - the Windows-authored spelling - is read like an LF one', () => {
+  // `DOTENV_LINE` ends in `(.*)$`, and `.` never crosses a line terminator, so a line split on `\n`
+  // alone leaves a `\r` that no line matched: a CRLF .env was never judged (a live key passed) and
+  // --presence reported every key absent.
+  const f = fixtures();
+  assert.equal(bash(`cat ${f.crlf}`), 2, 'a live key in a CRLF file blocks');
+  assert.equal(presence(f.crlf, 'API_KEY', 'SMTP_SECRET', 'DB_HOST').stdout,
+    'API_KEY=set (6 chars)\nSMTP_SECRET=set (8 chars)\nDB_HOST=set (9 chars)\n', 'lengths count no \\r');
 });
 
 test('guard-secret-value: the shell\'s own variable dumps are whole-environment dumps', () => {
