@@ -167,11 +167,36 @@ const RUNTIME = /\b(?:node|python3?|perl|ruby|deno|bun|pwsh|powershell)\b/;
 // the read the rule asks for; the segment passes as a whole.
 const PRESENCE_SHAPE = /\bwc\b|\b(?:grep|rg|egrep|fgrep)\s+(?:-\w*[clLq]\b|--count\b|--files-with-matches\b|--quiet\b)|\bjq\b[^\n]*\b(?:keys|length|has\()|\bcut\s+-d\s*=|\bawk\s+-F\s*=|\bsed\s+['"]s\/=\.\*\/\//;
 
+// Split on shell operators while respecting quoted strings.
+function splitSegments(command) {
+  const segs = [];
+  let current = '';
+  let inSingle = false, inDouble = false, inBacktick = false;
+  for (let i = 0; i < command.length; i++) {
+    const c = command[i];
+    const prev = i > 0 ? command[i - 1] : '';
+    // Track quote state
+    if (c === "'" && prev !== '\\' && !inDouble && !inBacktick) inSingle = !inSingle;
+    else if (c === '"' && prev !== '\\' && !inSingle && !inBacktick) inDouble = !inDouble;
+    else if (c === '`' && prev !== '\\' && !inSingle && !inDouble) inBacktick = !inBacktick;
+    // Check for delimiters only outside quotes
+    if (!inSingle && !inDouble && !inBacktick) {
+      if ((c === ';' || c === '\n') || (c === '&' && command[i + 1] === '&') || (c === '|' && command[i + 1] === '|')) {
+        if (c !== '&' && c !== '|') { if (current.trim()) segs.push(current); current = ''; continue; }
+        else { if (current.trim()) segs.push(current); current = ''; i++; continue; }
+      }
+    }
+    current += c;
+  }
+  if (current.trim()) segs.push(current);
+  return segs;
+}
+
 // ---- Bash matcher ----
 if (payload.tool_name === 'Bash') {
   const raw = String(input.command || '');
   const command = stripHeredocsOf(raw);
-  for (const seg of command.split(/&&|\|\||;|\n/)) {
+  for (const seg of splitSegments(command)) {
     if (/\s>>?\s*[^&\s>]/.test(seg)) continue; // output into a file never reaches the context
     if (PRESENCE_SHAPE.test(seg)) continue;
     if (/\bsed\s+(?:-\w*i|--in-place)\b/.test(seg)) continue; // an edit, not a dump
@@ -181,7 +206,13 @@ if (payload.tool_name === 'Bash') {
     // A dump verb or a runtime read on a file that HOLDS a credential - judged by content, not path.
     const candidates = [];
     if (DUMP_VERB.test(seg)) for (const tok of seg.split(/\s+/)) if (tok && !tok.startsWith('-') && /[\/.~$]/.test(tok)) candidates.push(tok);
-    if (RUNTIME.test(seg)) for (const m of seg.matchAll(/(["'])([^"'\n]{2,300})\1/g)) candidates.push(m[2]);
+    if (RUNTIME.test(seg)) {
+      const extracted = new Set();
+      for (const m of seg.matchAll(/(["'])([^"'\n]{2,300})\1/g)) extracted.add(m[2]);
+      for (const m of seg.matchAll(/'([^']{2,300})'/g)) extracted.add(m[1]);
+      for (const m of seg.matchAll(/"([^"]{2,300})"/g)) extracted.add(m[1]);
+      for (const x of extracted) candidates.push(x);
+    }
     for (const tok of candidates) {
       const file = resolveFile(tok);
       if (!file) continue;

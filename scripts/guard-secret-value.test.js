@@ -88,3 +88,14 @@ test('guard-secret-value: the --presence exemption covers its own segment only',
   assert.equal(bash(`node "${HOOK}" --presence "${f.secret}" SENTRY_ACCESS_TOKEN`), 0, 'the accessor alone');
   assert.equal(bash(`true && node "${HOOK}" --presence "${f.secret}" && cat ${f.secret}`), 2, 'a dump chained after the accessor is still a dump');
 });
+
+test('guard-secret-value: an inline runtime read of a credential file is the same dump, spelled differently', () => {
+  const f = fixtures();
+  assert.equal(bash(`node -e "const s=JSON.parse(require('fs').readFileSync('${f.secret}','utf8'));console.log(JSON.stringify(s.env||{},null,2))"`), 2, 'the measured leak');
+  assert.equal(bash(`node -e "console.log(Object.keys(require('${f.secret}').env))"`), 2, 'keys-only through a runtime still resolves the file - the sanctioned route is --presence');
+  assert.equal(bash(`python3 -c "import json;print(json.load(open('${f.secret}')))"`), 2, 'python json.load');
+  assert.equal(bash(`ruby -e "puts File.read('${f.secret}')"`), 2, 'ruby File.read');
+  assert.equal(bash(`node -e "console.log(require('${f.clean}').env)"`), 0, 'a clean file through a runtime passes');
+  assert.equal(bash(`node -e "console.log(require('fs').existsSync('${f.secret}'))"`), 2, 'existence through a runtime resolves the file too - use --presence, which is exempt by name');
+  assert.equal(bash(`node "${HOOK}" --presence "${f.secret}" SENTRY_ACCESS_TOKEN`), 0, 'the accessor itself is the sanctioned read');
+});
