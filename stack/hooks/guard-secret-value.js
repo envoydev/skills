@@ -263,4 +263,14 @@ if (payload.tool_name === 'Bash') {
   }
   process.exit(0);
 }
+
+// ---- Read matcher ----
+// The settings.json permissions.deny already stops a Read of the ACCOUNT files by path; this is the
+// content-judged complement for everything the path list cannot name - a project settings.json
+// holding a misplaced token, a dotenv, an appsettings.json.
+if (payload.tool_name === 'Read') {
+  const file = resolveFile(String(input.file_path || ''));
+  const key = file && secretIn(file);
+  if (key) block(`Blocked: Read of ${file}, which holds a credential under \`${key}\`.\n` + presenceHint(file));
+}
 process.exit(0);

@@ -159,3 +159,16 @@ test('guard-secret-value: a credential-shaped literal in the command is blocked,
   assert.equal(bash('curl -H "Authorization: Bearer $API_TOKEN" https://example.test/api'), 0, 'a variable reference in a non-print verb is not a literal (and not printed)');
   assert.equal(bash('echo "the token format is eyJ...header.payload.signature"'), 0, 'prose about the shape is not the shape');
 });
+
+test('guard-secret-value: the Read tool on a file that holds a credential is blocked by content, not path', () => {
+  const f = fixtures();
+  assert.equal(read(f.secret), 2, 'a project settings.json the deny list leaves open');
+  assert.equal(read(f.dotenv), 2, 'a dotenv file');
+  assert.equal(read(f.clean), 0, 'a clean settings.json - the hook wiring a session legitimately inspects');
+  assert.equal(read(f.mcp), 0, 'placeholders');
+  assert.equal(read(f.code), 0, 'source');
+  assert.equal(read(path.join(f.dir, 'missing.json')), 0, 'missing - let Read surface its own error');
+  const r = run({ tool_name: 'Read', tool_input: { file_path: f.secret }, session_id: 'suite' });
+  assert.match(r.stderr, /env\.SENTRY_ACCESS_TOKEN/);
+  assert.doesNotMatch(r.stderr, new RegExp(FAKE_TOKEN));
+});
