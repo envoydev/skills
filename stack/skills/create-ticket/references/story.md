@@ -34,8 +34,8 @@ so that [I achieve some goal / business value].
 
 ## Story-specific rules
 
-- **User Story format**: Always use the "As a / I want / So that" format. Infer the user type and goal if not explicitly stated.
-- **Acceptance Criteria**: Write at least 2, max ~6. Each must be independently testable - no vague criteria like "works correctly" or "looks good". Phrase as observable outcomes, not implementation steps.
+- **User Story format**: Always use the 'As a / I want / So that' format. Infer the user type and goal if not explicitly stated.
+- **Acceptance Criteria**: Write at least 2, max ~6. Each must be independently testable - no vague criteria like 'works correctly' or 'looks good'. Phrase as observable outcomes, not implementation steps.
 - **Notes**: Only include if there's something genuinely useful - edge cases, dependencies, or open questions. Don't pad.
 
 ## Example

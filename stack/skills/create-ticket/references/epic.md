@@ -32,8 +32,8 @@ Examples:
 
 ## Success Metrics
 
-- [ ] [Measurable outcome 1 - e.g., "Users can complete checkout without leaving the app"]
-- [ ] [Measurable outcome 2 - e.g., "p95 API response time < 300ms under expected load"]
+- [ ] [Measurable outcome 1 - e.g., 'Users can complete checkout without leaving the app']
+- [ ] [Measurable outcome 2 - e.g., 'p95 API response time < 300ms under expected load']
 - [ ] [Measurable outcome 3]
 
 ## Proposed Stories / Breakdown
@@ -50,9 +50,9 @@ Examples:
 
 ## Epic-specific rules
 
-- **Objective**: Focus on value and outcome, not implementation details. Don't start with "We need to build..." - frame it around the problem being solved.
+- **Objective**: Focus on value and outcome, not implementation details. Don't start with 'We need to build...' - frame it around the problem being solved.
 - **Scope**: Always include both in-scope and out-of-scope sections. Out of scope is often the most valuable part - it forces explicit decisions.
-- **Success Metrics**: At least 2. Make them observable and testable, not vague ("users are happy" is not a metric).
+- **Success Metrics**: At least 2. Make them observable and testable, not vague ('users are happy' is not a metric).
 - **Proposed Stories**: High-level breakdown only - no implementation details. These are suggestions to seed the backlog, not a final list.
 - **Notes**: Only include if genuinely useful. Don't pad.
 
@@ -111,3 +111,5 @@ Expected outcome: improved user retention and reduced support load from missed e
 - Email template design needs sign-off from product before implementation starts.
 - Related: [PROJ-88] User profile settings epic - preferences UI may be built there.
 ```
+
+The worked example above is illustrative, not a default stack - adapt provider and tool names to the project the epic is for.

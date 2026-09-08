@@ -43,8 +43,8 @@ Relevant call chain (from <source>):
 
 - **Stack-agnostic**: serves any programming language and stack - never bias toward one. Keep wording and `symbol:line` / `file:line` notation language-neutral and adapt it to the language the bug is actually in; the example below is illustrative, not a default stack.
 - **Code**: Include a code snippet only if it is the clearest way to show the problem (e.g., a failing request body, a specific SQL query). If it can be explained in plain text, skip the code. For a stack trace / call chain, do not paste the raw trace - distil it to a `- file:line - code` bullet list (see the structure above).
-- **Steps to Reproduce**: If exact steps are not provided, infer them from context. If they truly cannot be determined, write "Steps not yet identified - needs investigation."
-- **Impact**: Always include this. If not specified, infer from context (e.g., if a login flow is broken, impact is "All users unable to authenticate").
+- **Steps to Reproduce**: If exact steps are not provided, infer them from context. If they truly cannot be determined, write 'Steps not yet identified - needs investigation.'
+- **Impact**: Always include this. If not specified, infer from context (e.g., if a login flow is broken, impact is 'All users unable to authenticate').
 
 ## Example
 
@@ -70,7 +70,7 @@ Observed on production, OrderId 88213. Log Id: 7c2f1a90-... (2026-06-13T20:11:17
 2. Navigate to Orders -> Order Detail (`/orders/88213`).
 3. The page builds the summary and calls `OrderSummaryService.formatAddress(order.shippingAddress)`.
 
-**Expected:** The summary renders; a missing shipping address is handled gracefully (omitted or shown as "-") without throwing.
+**Expected:** The summary renders; a missing shipping address is handled gracefully (omitted or shown as '-') without throwing.
 **Actual:** A null-reference error is thrown because `address` is null, breaking the order-summary pipeline.
 
 ## Impact
