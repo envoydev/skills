@@ -29,13 +29,16 @@ Adapt the structure based on task type. Use the relevant template below.
 ```
 ## Goal
 
-[1-3 sentences. What is being changed and why. Focus on the technical motivation -
- performance, maintainability, correctness, consistency, or risk reduction.]
+[2-4 sentences. What happens today, in which situation, and what should happen instead - readable
+ by someone who has never opened the code. Then the technical motivation: performance,
+ maintainability, correctness, consistency, or risk reduction.]
 
 ## Scope
 
-[What is included. Be specific - files, modules, services, APIs affected.
- Call out what is explicitly OUT of scope to prevent scope creep.]
+[Which areas, screens or flows are affected, named the way a tester finds them. Where the product
+ already behaves the wanted way somewhere else, name that place in one line as the example to
+ compare against, and what differs. No new file, class or method names - that is the
+ implementation, and it is not decided here. Call out what is explicitly OUT of scope.]
 
 ## Acceptance Criteria
 
@@ -55,7 +58,7 @@ Adapt the structure based on task type. Use the relevant template below.
 ## Goal
 
 [What is slow, under what conditions, and what the impact is.
- Include baseline metrics if known (e.g., "p99 = 3.2s under 500 concurrent users").]
+ Include baseline metrics if known (e.g., 'p99 = 3.2s under 500 concurrent users').]
 
 ## Baseline / Target
 
@@ -89,7 +92,7 @@ Adapt the structure based on task type. Use the relevant template below.
 
 ## Time-box
 
-[Maximum time to spend: e.g., "2 days", "1 sprint". Work stops when time-box ends.]
+[Maximum time to spend: e.g., '2 days', '1 sprint'. Work stops when time-box ends.]
 
 ## Questions to Answer
 
@@ -110,7 +113,8 @@ Adapt the structure based on task type. Use the relevant template below.
 
 - **Task type detection**: Infer the type from the user's description. If ambiguous, pick the closest match and note the assumption in Notes.
 - **Acceptance Criteria**: For refactor/cleanup/upgrade/migration - always include. For perf - include with metrics. For spikes - replace with Deliverable instead.
-- **Specificity**: Be technical and concrete. No vague goals like "improve performance" without numbers, conditions, or a defined target.
+- **Behaviour over solution**: even on a deeply technical task, most of the text is what the software does now and what it must do instead - QA reads this ticket too. When the work extends something already built, Scope names that existing behaviour as the example and the delta from it ('same rule, without the quantity check'), never a file-by-file spec of new code. Writing up your own implementation plan as if the design were settled is the most common failure here - see the two Scope rules in `SKILL.md`.
+- **Specificity**: Be technical and concrete. No vague goals like 'improve performance' without numbers, conditions, or a defined target.
 
 ## Examples
 
@@ -193,5 +197,43 @@ Baseline to be established during investigation.
 - Check for missing indexes on product search columns first - low-effort, high-impact candidate.
 - Use Application Insights / slow query log for initial profiling.
 ```
+
+**Input (from user):**
+> The license gate is only wired up for the Reporting module - we need it on the other eight modules too.
+
+**Output:**
+
+**Title:**
+`[Licensing] Extend the license module gate to the eight remaining modules`
+
+**Description:**
+```
+## Goal
+
+A module licence has a validity window, and once it lapses the module should stop being usable. Today only Reporting behaves that way: opening it with a lapsed licence offers to extend the trial, or blocks the module when no trial activation is left. The other eight modules - Administration, Base Data, Field Journal, Fields, Import, Nutrition, Plant Protection and Settings - stay fully usable with an expired licence, so the licence is effectively unenforced everywhere except Reporting.
+
+## Scope
+
+The eight modules above, entered from the menu or by pasting the URL directly. Reporting is the example to compare against: the same dialog, the same blocking overlay, the same wording. The one difference is the rule behind it - these eight are judged on the licence dates and the trial only, with no quantity or area limit involved.
+
+**Out of scope:** Reporting's own behaviour, which does not change; enforcement on the server side; new wording or translations.
+
+## Acceptance Criteria
+
+- [ ] With a lapsed licence and a trial activation still available, entering any of the eight modules offers to extend, exactly as Reporting does
+- [ ] Confirming the extension makes the module usable again and moves the trial end date out by one month, visible in the licence overview
+- [ ] With a lapsed licence and no trial left, the module is blocked and shows the same overlay Reporting shows, icon included
+- [ ] The licence overview and the user profile stay reachable even when the Settings licence has lapsed - otherwise there is no way back in
+- [ ] A licence marked as not checked, an active trial, or a past campaign year each leave the module fully usable
+- [ ] Entering two modules quickly one after the other never shows one module's result on the other
+- [ ] Users with the support role keep their existing bypass
+
+## Notes
+
+- Reaching the extend dialog for a lapsed licence may not work as it does for Reporting today - worth checking early, since it is the case the dialog exists for.
+- The trial offer is gated per module by a flag in the module configuration; confirm it is set for the eight before assuming the extend path is reachable at all.
+```
+
+Note what the Scope does NOT do: it names no file, class or method, and nothing that does not exist yet. It describes the behaviour, points at the one module that already has it, and states the delta. Every criterion is something QA can trigger on a running system. The two unproven findings sit in Notes as checks, not instructions. Ticket writing stops at the boundary of the design.
 
 The worked example above is illustrative, not a default stack - the same stack-agnostic rule as `bug.md`: adapt tool and stack names to the project the ticket is for.
