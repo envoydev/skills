@@ -29,7 +29,11 @@ const SECRET_KEY_SOURCE = '(TOKEN|SECRET|KEY|PASSWORD|PASSWD|DSN|CREDENTIAL|AUTH
 const SECRET_KEY_RE = new RegExp(SECRET_KEY_SOURCE, 'i');
 // The value shapes the stack's credentials take - copied from guard-stop-contract.js; keep identical.
 const SECRET_SHAPE = /\b(sntryu_[0-9a-f]{16,}|ctx7sk-[0-9a-f-]{16,}|ghp_[A-Za-z0-9]{20,}|gho_[A-Za-z0-9]{20,}|sk-ant-[A-Za-z0-9_-]{20,}|xox[baprs]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16}|eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,})/;
-const MAX_BYTES = 512 * 1024; // a credential file is small; anything larger is not one
+// A credential file is small - a settings.json is under 10 KB - so the cap costs this gate nothing
+// on the files it exists for. The trade it makes is deliberate and stated: a larger file holding a
+// credential passes unscanned, because it is a data dump, which guard-read-whole-file.js is the gate
+// for, and scanning megabytes on every Bash call would cost every session for that one shape.
+const MAX_BYTES = 512 * 1024;
 
 // A `${VAR}` placeholder or a blank is not a live value - .mcp.json carries `${SENTRY_ACCESS_TOKEN}`
 // by design, and an installer seeds `"SENTRY_ACCESS_TOKEN": ""` for the user to fill in.
@@ -96,14 +100,19 @@ function secretIn(file) {
 const MOUNT_RE = /^(?:\/cygdrive)?\/([A-Za-z])(?=\/|$)/;
 const nativePath = (p) => (process.platform === 'win32' ? String(p).replace(MOUNT_RE, (m, d) => `${d.toUpperCase()}:\\`) : String(p));
 const HOME = os.homedir() || '';
-// Expand the few variables a credential path is spelled with (`~`, $HOME, $CLAUDE_PROJECT_DIR,
-// $CLAUDE_CONFIG_DIR - also in the `${VAR:-default}` form). Any other `$` is an unexpanded variable
-// this guard cannot judge (the cross-project guard's rule) and the token is skipped.
-const KNOWN_VARS = () => ({
-  HOME,
-  CLAUDE_PROJECT_DIR: process.env.CLAUDE_PROJECT_DIR || '',
-  CLAUDE_CONFIG_DIR: process.env.CLAUDE_CONFIG_DIR || pathMod.join(HOME, '.claude'),
-});
+const accountDir = () => process.env.CLAUDE_CONFIG_DIR || pathMod.join(HOME, '.claude');
+// The variables a credential path is spelled with (`~`, $HOME, $CLAUDE_PROJECT_DIR,
+// $CLAUDE_CONFIG_DIR - also in the `${VAR:-default}` form), PLUS the NAME=value assignments the
+// command itself makes: `f=<file>; cat $f` put the path one segment away from the token scan and
+// nothing judged it. Values are lists because `for f in <glob>` binds several. Any other `$` is an
+// unexpanded variable this guard cannot judge (the cross-project guard's rule) - the token is
+// skipped rather than guessed at.
+const VARS = new Map([
+  ['HOME', [HOME]],
+  ['CLAUDE_PROJECT_DIR', [process.env.CLAUDE_PROJECT_DIR || '']],
+  ['CLAUDE_CONFIG_DIR', [accountDir()]],
+]);
+const KNOWN_VARS = () => { const o = {}; for (const [k, v] of VARS) o[k] = v[0]; return o; };
 function expandPath(token) {
   const known = KNOWN_VARS();
   let p = String(token).replace(/^["'`]|["'`]$/g, '').replace(/^~(?=\/|$)/, HOME);
@@ -111,17 +120,94 @@ function expandPath(token) {
   // `my\ dir/settings.json` is one token the shell hands over with the space intact.
   return /\$/.test(p) ? null : nativePath(p.replace(/\\ /g, ' '));
 }
+// A variable bound to several paths (a `for` list) becomes several tokens; a single value is left
+// to expandPath. Capped - a fan-out is a convenience, not a search.
+function fanOut(token) {
+  const out = [];
+  const re = /\$\{([A-Za-z_]\w*)\}|\$([A-Za-z_]\w*)/;
+  const walk = (t, depth) => {
+    if (out.length >= 20) return;
+    const m = t.match(re);
+    const vals = m && VARS.get(m[1] || m[2]);
+    if (!vals || vals.length < 2 || depth > 2) { out.push(t); return; }
+    for (const v of vals) walk(t.slice(0, m.index) + v + t.slice(m.index + m[0].length), depth + 1);
+  };
+  walk(String(token), 0);
+  return out;
+}
 let payload; // set below; resolveFile reads its cwd
+// A `cd` earlier in the command moves the anchor for everything after it (the house pattern is
+// guard-cross-project-write.js): `cd .claude && cat settings-secret.json` named no path the scan
+// could resolve. The default anchors stay in the list - a cd this guard cannot follow (`cd -`, an
+// unexpanded variable) leaves the judgement exactly where it was, never worse.
+let cwdAnchor = null;
 // The anchors a relative path is tried against. A payload field is attacker-shaped input, not a
 // promise: a non-string `cwd` reached pathMod.join and threw ERR_INVALID_ARG_TYPE, and a hook that
 // exits 1 fails OPEN - the dump it was judging ran (review finding, reproduced with `"cwd": 5`).
-const anchorDirs = () => [process.env.CLAUDE_PROJECT_DIR, payload && payload.cwd, process.cwd()]
+const anchorDirs = () => [cwdAnchor, process.env.CLAUDE_PROJECT_DIR, payload && payload.cwd, process.cwd()]
   .filter((d) => typeof d === 'string' && d);
-function resolveFile(token) {
-  const p = expandPath(token);
-  if (!p || p === '' ) return null;
-  const cands = pathMod.isAbsolute(p) ? [p] : anchorDirs().map((d) => pathMod.join(d, p));
+// The account dir is an anchor only for a segment that SPELLS it (`os.homedir()`, `expanduser('~')`,
+// `$USERPROFILE`) with a bare settings file name - the runtime shape that builds the path at run
+// time and hands the scan no path at all.
+let homeAnchor = false;
+const ACCOUNT_FILE = /^settings(?:\.local)?\.json$/;
+
+// Brace alternatives (`{settings,x}.json`) - one level at a time, no whitespace or quotes inside,
+// which keeps a JSON literal out of the expansion, and capped.
+function expandBraces(p) {
+  const m = p.match(/\{([^{}\s"']*,[^{}\s"']*)\}/);
+  if (!m) return [p];
+  const out = [];
+  for (const alt of m[1].split(',')) {
+    for (const rest of expandBraces(p.slice(0, m.index) + alt + p.slice(m.index + m[0].length))) {
+      if (out.length < 20) out.push(rest);
+    }
+  }
+  return out;
+}
+const GLOB_CHARS = /[*?[]/;
+const globToRe = (pat) => new RegExp('^' + pat.replace(/[.+^${}()|\\]/g, '\\$&').replace(/\*/g, '[^/]*').replace(/\?/g, '[^/]') + '$');
+// `cat .env*` and `cat .claude/*.json` name the file as surely as spelling it out. ONE directory
+// listing per glob token - the first anchor that has a match wins, and only the LAST path component
+// may glob (a glob in a directory component would need a walk, and this hook runs on every Bash call).
+function globPaths(p) {
+  const idx = Math.max(p.lastIndexOf('/'), p.lastIndexOf('\\'));
+  const dirPart = idx >= 0 ? p.slice(0, idx) : '';
+  const pat = idx >= 0 ? p.slice(idx + 1) : p;
+  if (!GLOB_CHARS.test(pat) || GLOB_CHARS.test(dirPart)) return [];
+  let re;
+  try { re = globToRe(pat); } catch { return []; }
+  const dirs = dirPart === '' ? anchorDirs()
+    : pathMod.isAbsolute(dirPart) ? [dirPart] : anchorDirs().map((d) => pathMod.join(d, dirPart));
+  for (const d of dirs) {
+    let names;
+    try { names = fs.readdirSync(d); } catch { continue; }
+    const hits = names.slice(0, 200).filter((n) => re.test(n)).map((n) => pathMod.join(d, n));
+    if (hits.length) return hits;
+  }
+  return [];
+}
+// One token -> every path it can name: a list variable's values, brace alternatives, glob matches.
+function candidatePaths(token) {
+  const out = [];
+  for (const t of fanOut(token)) {
+    const p = expandPath(t);
+    if (!p) continue;
+    for (const b of expandBraces(p)) {
+      if (GLOB_CHARS.test(b)) out.push(...globPaths(b));
+      else if (b) out.push(b);
+    }
+  }
+  return out;
+}
+function statFile(p) {
+  const cands = pathMod.isAbsolute(p) ? [p]
+    : (homeAnchor && ACCOUNT_FILE.test(p) ? [pathMod.join(accountDir(), p)] : []).concat(anchorDirs().map((d) => pathMod.join(d, p)));
   for (const c of cands) { try { if (fs.statSync(c).isFile()) return c; } catch { /* next anchor */ } }
+  return null;
+}
+function resolveFile(token) {
+  for (const p of candidatePaths(token)) { const f = statFile(p); if (f) return f; }
   return null;
 }
 
@@ -205,20 +291,76 @@ const presenceHint = (file) =>
   `the file by hand. A credential in a PROJECT settings.json belongs in the ACCOUNT file\n` +
   `(~/.claude/settings.json, or the space's): only that env reaches .mcp.json expansion.\n`;
 
-// A heredoc body is DATA, not shell: a plan that merely DESCRIBES `cat ~/.claude/settings.json` is
-// inert text (reproduced against the sibling guards). Blank the payload spans, keeping the character
-// count so any index into the command still holds.
-const stripHeredocsOf = (c) => c.replace(
-  /<<-?\s*(['"]?)([A-Za-z_][A-Za-z0-9_]*)\1[\s\S]*?^\s*\2\s*$/gm,
-  (m) => m.replace(/[^\n]/g, ' '),
-);
 // The verbs that print a file, and the runtimes whose inline reads do the same with a different
 // spelling. `grep` is a dump verb: `grep -n SENTRY settings.json` prints the value's whole line.
-const DUMP_VERB = /\b(?:cat|head|tail|sed|less|more|awk|jq|bat|strings|grep|rg|egrep|fgrep)\b/;
+// The second half of the list is the review's: `tac`, `base64`, `xxd` and friends print the same
+// bytes in a different order or encoding, and a dump verb only matters when its file token holds a
+// live credential, so the false-positive cost of a long list is nil. `cp` and `dd` are NOT here -
+// `cp .env .env.bak` is a legitimate backup, and it prints nothing.
+const DUMP_VERB = /\b(?:cat|head|tail|sed|less|more|awk|jq|bat|strings|grep|rg|egrep|fgrep|tac|nl|pr|od|xxd|hexdump|base64|paste|fold|column|sort|uniq|cut|tee)\b/;
 const RUNTIME = /\b(?:node|python3?|perl|ruby|deno|bun|pwsh|powershell)\b/;
-// A pipeline that reduces to PRESENCE - a count, a length, a key list, names without values - is
-// the read the rule asks for; the segment passes as a whole.
-const PRESENCE_SHAPE = /\bwc\b|\b(?:grep|rg|egrep|fgrep)\s+(?:-\w*[clLq]\b|--count\b|--files-with-matches\b|--quiet\b)|\bjq\b[^\n]*\b(?:keys|length|has\()|\bcut\s+-d\s*=|\bawk\s+-F\s*=|\bsed\s+['"]s\/=\.\*\/\//;
+// A heredoc body is DATA, not shell: a plan that merely DESCRIBES `cat ~/.claude/settings.json` is
+// inert text (reproduced against the sibling guards). Blank the payload spans, keeping the character
+// count so any index into the command still holds - EXCEPT when the heredoc feeds a runtime or a
+// shell (`python3 - <<'EOF'`, `bash <<'EOF'`), where the body is the command and blanking it hid
+// the dump completely (review finding). Those bodies come back in `code` to be judged as code.
+const HEREDOC_RE = /<<-?\s*(['"]?)([A-Za-z_][A-Za-z0-9_]*)\1[\s\S]*?^\s*\2\s*$/gm;
+const CODE_HEREDOC = new RegExp(`(?:${RUNTIME.source}|\\b(?:bash|sh|zsh|dash)\\b)`);
+function stripHeredocsOf(c, code) {
+  return c.replace(HEREDOC_RE, (m, q, tag, offset) => {
+    const head = c.slice(c.lastIndexOf('\n', offset) + 1, offset);
+    if (code && CODE_HEREDOC.test(head)) {
+      code.push({ body: m.replace(/^[^\n]*\n?/, '').replace(/\n[^\n]*$/, ''), runtime: RUNTIME.test(head) });
+    }
+    return m.replace(/[^\n]/g, ' ');
+  });
+}
+// `#` starts a comment only at the start of a word outside quotes - `${#VAR}` is a length. Judging
+// the comment text let `cat <secret> # wc` borrow an exemption from a word the shell never runs.
+function stripComments(text) {
+  let out = '';
+  let quote = null;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (quote) {
+      out += ch;
+      if (ch === '\\' && quote === '"' && i + 1 < text.length) { out += text[++i]; continue; }
+      if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === '\\' && i + 1 < text.length) { out += ch + text[++i]; continue; }
+    if (ch === '"' || ch === '\'') { quote = ch; out += ch; continue; }
+    if (ch === '#' && (out === '' || /[\s;|&(]$/.test(out))) { while (i + 1 < text.length && text[i + 1] !== '\n') i++; continue; }
+    out += ch;
+  }
+  return quote ? text : out; // an unbalanced quote: judge the raw text rather than guess where it ends
+}
+// A stage that REDUCES its input to presence - a count, a length, a key list, names without values.
+// Scoped to the stage's own command word: `\bwc\b` matched inside `grep -v wc`, and `jq keys`
+// matched `jq 'keys, .'`, which prints the whole document beside the keys (review findings).
+const PREFIX_WORDS = /^\s*(?:(?:sudo|command|nice|time|exec|builtin|nohup|\w+=\S*)\s+)*/;
+function jqReduces(stage) {
+  let filter = null;
+  for (const t of shellTokens(stage).slice(1)) { if (t.startsWith('-')) continue; filter = t.replace(/^(['"])([\s\S]*)\1$/, '$2'); break; }
+  if (filter == null || filter.includes(',')) return false; // `,` prints both sides
+  return /^(?:keys|keys_unsorted|length|type|has\([^)]*\))$/.test(filter.split('|').pop().trim());
+}
+function isReducer(stage) {
+  const s = stage.replace(PREFIX_WORDS, '');
+  if (/^wc\b/.test(s)) return true;
+  if (/^(?:grep|rg|egrep|fgrep)\s+(?:-\w*[clLq]\b|--count\b|--files-with-matches\b|--quiet\b)/.test(s)) return true;
+  if (/^cut\s+(?:-d\s*['"]?=['"]?|--delimiter[= ]['"]?=['"]?)\s+-f\s*1(?![\d,\-])/.test(s)) return true; // -f1 is the NAME; -f2 and -f1- carry the value
+  if (/^awk\s+-F\s*['"]?=/.test(s) && /\$1\b/.test(s) && !/\$(?:0|[2-9])/.test(s)) return true;
+  if (/^sed\s+['"]?s\/=\.\*\/\//.test(s)) return true;
+  if (/^jq\b/.test(s)) return jqReduces(s);
+  return false;
+}
+// A redirect into a FILE never reaches the context - but `/dev/stdout`, `/dev/stderr` and `/dev/tty`
+// ARE the context, and a `tee` stage writing to one prints everything upstream of the reducer.
+const TERMINAL_DEV = /^\/dev\/(?:std(?:out|err)|tty|fd\/[12])$/;
+const REDIRECT_RE = /(?:^|\s)\d?>>?\s*([^&\s>|]+)/g;
+const redirectsToFile = (seg) => [...seg.matchAll(REDIRECT_RE)].some((m) => !TERMINAL_DEV.test(m[1]));
+const teesToTerminal = (stage) => /^tee\b[^|]*?(\/dev\/(?:std(?:out|err)|tty|fd\/[12]))\b/.test(stage.replace(PREFIX_WORDS, ''));
 
 // Split `text` at the separators `sepAt` reports (their length at position i, 0 for none),
 // honouring quotes: an escaped char outside quotes and inside double quotes is skipped, single
@@ -287,70 +429,110 @@ if (payload.tool_name === 'Bash') {
       'Per baseline-security.md a secret never passes through a tool call or the chat: the user puts it\n' +
       'in the file by hand, or runs a copy-ready command in their own terminal (getpass, not an argument).\n');
   }
-  const command = stripHeredocsOf(raw);
-  for (const seg of splitSegments(command)) {
-    if (/\s>>?\s*[^&\s>]/.test(seg)) continue; // output into a file never reaches the context
-    if (PRESENCE_SHAPE.test(seg)) continue;
+  const code = [];
+  const command = stripHeredocsOf(raw, code);
+  judgeShell(command, false);
+  // The heredoc bodies that ARE commands: a runtime body is judged as inline code, a shell body as
+  // the shell it is.
+  for (const h of code) judgeShell(h.body, h.runtime);
+  process.exit(0);
+}
+
+function blockVariable(name) {
+  block(`Blocked: \`${name}\` is a credential-shaped variable and this prints its value.\n` +
+    `Presence only: [ -n "$${name}" ] && echo "${name}=set (\${#${name}} chars)" || echo "${name}=absent"\n`);
+}
+// A declaration, not a const: judgeShell runs from the Bash branch ABOVE these lines, so an arrow
+// bound here would still be in its temporal dead zone and the gate would throw instead of blocking.
+function blockEnvDump() {
+  block('Blocked: a whole-environment dump (env / printenv / set / export -p / declare -p) prints every\n' +
+    'exported credential. Names only: env | cut -d= -f1. One non-secret variable: printenv NAME. A\n' +
+    'credential: presence only, [ -n "$NAME" ] && echo "NAME=set (${#NAME} chars)" || echo "NAME=absent".\n');
+}
+
+function judgeShell(text, forceRuntime) {
+  cwdAnchor = null;
+  for (const seg of splitSegments(stripComments(text))) {
+    // A `NAME=value` assignment, or a `for NAME in <list>`, binds the path the NEXT segment dumps.
+    const asg = seg.match(/^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)=("[^"]*"|'[^']*'|[^\s;|&]*)/);
+    if (asg) VARS.set(asg[1], [asg[2].replace(/^(["'])([\s\S]*)\1$/, '$2')]);
+    const loop = seg.match(/^\s*for\s+([A-Za-z_][A-Za-z0-9_]*)\s+in\s+([^\n;]+)/);
+    if (loop) VARS.set(loop[1], shellTokens(loop[2]).filter((t) => t !== 'do').slice(0, 20));
+    const cd = seg.match(/^\s*(?:cd|pushd)\s+("[^"]*"|'[^']*'|[^\s;|&]+)/);
+    if (cd) {
+      const d = expandPath(cd[1]);
+      if (d && d !== '-') cwdAnchor = pathMod.isAbsolute(d) ? d : pathMod.join(cwdAnchor || anchorDirs()[0] || '.', d);
+    }
+
+    const stages = splitPipes(seg);
+    // A tee to a terminal device prints the file whatever the pipeline does next, so neither the
+    // redirect skip nor the presence exemption applies to a segment carrying one.
+    if (!stages.some(teesToTerminal)) {
+      if (redirectsToFile(seg)) continue; // output into a file never reaches the context
+      if (stages.some(isReducer)) continue;
+    }
     if (/\bsed\s+(?:-\w*i|--in-place)\b/.test(seg)) continue; // an edit, not a dump
-    // The sanctioned read is exempt by name - it is this file.
-    if (/guard-secret-value\.js["']?\s+--presence\b/.test(seg)) continue;
 
-    // Printing a credential-shaped VARIABLE: echo / printf with $NAME or ${NAME...}, printenv NAME.
-    // `${#NAME}` is a length - the presence idiom - and `[ -n "$NAME" ]` is a test, so only the
-    // arguments of a PRINT verb are judged - and only within the verb's own pipeline STAGE: a
-    // variable in a later `grep -v "$X"` stage is not printed, and a `curl -d "$TOKEN"` stage is a
-    // use, not a print (the value never enters the transcript).
-    for (const stage of splitPipes(seg)) {
-      const pr = stage.match(/(?:^|[\s(])(echo|printf|printenv)\b([^\n]*)/);
-      if (!pr) continue;
-      const names = [...pr[2].matchAll(/\$\{?(?!#)([A-Za-z_][A-Za-z0-9_]*)/g)].map((m) => m[1]);
-      if (pr[1] === 'printenv') names.push(...pr[2].trim().split(/\s+/).filter((w) => /^[A-Za-z_][A-Za-z0-9_]*$/.test(w)));
-      const hit = names.find((n) => SECRET_KEY_RE.test(n));
-      if (hit) {
-        block(`Blocked: \`${hit}\` is a credential-shaped variable and this prints its value.\n` +
-          `Presence only: [ -n "$${hit}" ] && echo "${hit}=set (\${#${hit}} chars)" || echo "${hit}=absent"\n`);
+    for (const stage of stages) {
+      // The sanctioned read is exempt by name - it is this file - and only in its OWN stage: the
+      // exemption used to cover the whole segment, so `--presence <file> | cat <file>` passed.
+      if (/guard-secret-value\.js["']?\s+--presence\b/.test(stage)) continue;
+
+      // Printing a credential-shaped VARIABLE: echo / printf with $NAME or ${NAME...}, printenv NAME.
+      // `${#NAME}` is a length - the presence idiom - and `[ -n "$NAME" ]` is a test, so only the
+      // arguments of a PRINT verb are judged - and only within the verb's own pipeline STAGE: a
+      // variable in a later `grep -v "$X"` stage is not printed, and a `curl -d "$TOKEN"` stage is a
+      // use, not a print (the value never enters the transcript). EVERY print verb in the stage is
+      // judged, not just the first - the arguments of `echo` swallowed `$(printenv NAME)` whole.
+      const verbs = [...stage.matchAll(/(?:^|[\s(])(echo|printf|printenv)\b/g)];
+      for (let i = 0; i < verbs.length; i++) {
+        const args = stage.slice(verbs[i].index + verbs[i][0].length, i + 1 < verbs.length ? verbs[i + 1].index : stage.length);
+        const names = [...args.matchAll(/\$\{?(?!#)([A-Za-z_][A-Za-z0-9_]*)/g)].map((m) => m[1]);
+        if (verbs[i][1] === 'printenv') {
+          names.push(...shellTokens(args).map((w) => w.replace(/[^A-Za-z0-9_]/g, '')).filter((w) => /^[A-Za-z_]\w*$/.test(w)));
+        }
+        const hit = names.find((n) => SECRET_KEY_RE.test(n));
+        if (hit) blockVariable(hit);
       }
-    }
-    // A whole-environment dump prints every exported credential. `env` as a command PREFIX
-    // (`env FOO=bar cmd`) runs a command; only a bare `env` / `printenv` (or one piped onward) dumps -
-    // and a prefix word of its own (`sudo env`, `command printenv`, `FOO=bar env`) changes nothing.
-    if (/^\s*(?:(?:sudo|command|nice|time|exec|builtin|nohup|\w+=\S*)\s+)*(?:env|printenv)\s*(?:\||$)/.test(seg)) {
-      block('Blocked: a whole-environment dump (env / printenv) prints every exported credential.\n' +
-        'Names only: env | cut -d= -f1. One non-secret variable: printenv NAME. A credential: presence only,\n' +
-        '[ -n "$NAME" ] && echo "NAME=set (${#NAME} chars)" || echo "NAME=absent".\n');
-    }
+      // `declare -p NAME` / `typeset -p NAME` print one variable's value, like printenv NAME.
+      const dp = stage.replace(PREFIX_WORDS, '').match(/^(?:declare|typeset)\s+-p\s+([^\n|]+)/);
+      if (dp) { const hit = shellTokens(dp[1]).find((n) => SECRET_KEY_RE.test(n)); if (hit) blockVariable(hit); }
 
-    // A runtime reading the environment - `node -e "console.log(process.env.SENTRY_ACCESS_TOKEN)"`
-    // is `echo $SENTRY_ACCESS_TOKEN` with more syntax. The denial names the VARIABLE, never a value.
-    if (RUNTIME.test(seg)) {
-      for (const re of ENV_NAMED) {
-        for (const m of seg.matchAll(re)) {
-          if (SECRET_KEY_RE.test(m[1])) {
-            block(`Blocked: \`${m[1]}\` is a credential-shaped variable and this prints its value.\n` +
-              `Presence only: [ -n "$${m[1]}" ] && echo "${m[1]}=set (\${#${m[1]}} chars)" || echo "${m[1]}=absent"\n`);
-          }
+      // A whole-environment dump prints every exported credential. `env` as a command PREFIX
+      // (`env FOO=bar cmd`) runs a command; only a bare dump verb (or one piped onward) dumps - and a
+      // prefix word of its own (`sudo env`, `command printenv`, `FOO=bar env`) changes nothing. The
+      // shell's OWN listings (`set`, `export`, `declare -p`) print the same values and passed every
+      // probe until the review; their argument-carrying forms (`set -e`, `export FOO=x`) do not match.
+      if (/^(?:env|printenv|export\s+-p|export|declare\s+-p|typeset\s+-p|set)\s*(?:\||$)/.test(stage.replace(PREFIX_WORDS, ''))) blockEnvDump();
+
+      // A runtime reading the environment - `node -e "console.log(process.env.SENTRY_ACCESS_TOKEN)"`
+      // is `echo $SENTRY_ACCESS_TOKEN` with more syntax. The denial names the VARIABLE, never a value.
+      const isRuntime = forceRuntime || RUNTIME.test(stage);
+      if (isRuntime) {
+        for (const re of ENV_NAMED) for (const m of stage.matchAll(re)) if (SECRET_KEY_RE.test(m[1])) blockVariable(m[1]);
+        if (ENV_BARE.test(stage.replace(ENV_REDUCED, ' keys ')) && RUNTIME_PRINT.test(stage)) blockEnvDump();
+      }
+
+      // A dump verb or a runtime read on a file that HOLDS a credential - judged by content, not path.
+      homeAnchor = isRuntime && /homedir|expanduser|USERPROFILE|HOME/.test(stage);
+      const candidates = [];
+      if (DUMP_VERB.test(stage) || isRuntime) for (const tok of shellTokens(stage)) if (!tok.startsWith('-') && /[\/.~$]/.test(tok)) candidates.push(tok);
+      // A runtime spells the path inside its own code - single, double or backtick quoted.
+      if (isRuntime) for (const m of stage.matchAll(/(["'`])([^"'`\n]{2,300})\1/g)) candidates.push(m[2]);
+      // `< file` feeds the file to whatever the stage runs, `while read` and `done < file` included -
+      // the same read as `cat file`, which is why `cat < file` already blocked.
+      for (const m of stage.matchAll(/(?:^|[^<])<\s*("[^"]*"|'[^']*'|[^\s;|&<>()]+)/g)) candidates.push(m[1]);
+      for (const tok of candidates) {
+        for (const p of candidatePaths(tok)) {
+          const file = statFile(p);
+          if (!file) continue;
+          const key = secretIn(file);
+          if (!key) continue;
+          block(`Blocked: ${file} holds a credential under \`${key}\` - this dumps its value into the transcript.\n` + presenceHint(file));
         }
       }
-      if (ENV_BARE.test(seg.replace(ENV_REDUCED, ' keys ')) && RUNTIME_PRINT.test(seg)) {
-        block('Blocked: a whole-environment dump (env / printenv) prints every exported credential.\n' +
-          'Names only: env | cut -d= -f1. One non-secret variable: printenv NAME. A credential: presence only,\n' +
-          '[ -n "$NAME" ] && echo "NAME=set (${#NAME} chars)" || echo "NAME=absent".\n');
-      }
-    }
-
-    // A dump verb or a runtime read on a file that HOLDS a credential - judged by content, not path.
-    const candidates = [];
-    if (DUMP_VERB.test(seg)) for (const tok of shellTokens(seg)) if (!tok.startsWith('-') && /[\/.~$]/.test(tok)) candidates.push(tok);
-    if (RUNTIME.test(seg)) for (const m of seg.matchAll(/(["'])([^"'\n]{2,300})\1/g)) candidates.push(m[2]);
-    for (const tok of candidates) {
-      const file = resolveFile(tok);
-      if (!file) continue;
-      const key = secretIn(file);
-      if (!key) continue;
-      block(`Blocked: ${file} holds a credential under \`${key}\` - this dumps its value into the transcript.\n` + presenceHint(file));
     }
   }
-  process.exit(0);
 }
 
 // ---- Read matcher ----

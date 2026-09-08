@@ -260,3 +260,101 @@ test('guard-secret-value --presence: reports set (N chars) or absent, never a va
   const tilde = presence('~/.this-file-does-not-exist-guard-secret-value.json', 'X');
   assert.match(tilde.stdout, /^# .*\.this-file-does-not-exist-guard-secret-value\.json: not found\nX=absent\n$/, '~ is expanded');
 });
+
+test('guard-secret-value: the shell\'s own variable dumps are whole-environment dumps', () => {
+  assert.equal(bash('set | grep -i sentry'), 2, 'set prints every variable, exported or not');
+  assert.equal(bash('export | grep -i sentry'), 2, 'export with no argument lists values');
+  assert.equal(bash('export -p'), 2, 'the portable spelling');
+  assert.equal(bash('declare -p | grep TOKEN'), 2, 'declare -p is the same list');
+  assert.equal(bash('declare -p SENTRY_ACCESS_TOKEN'), 2, 'a NAME argument is judged like printenv NAME');
+  assert.equal(bash('typeset -p'), 2, 'the ksh/zsh spelling');
+  assert.equal(bash('set -e'), 0, 'a shell option carries an argument - not a dump');
+  assert.equal(bash('set -- x'), 0, 'positional parameters');
+  assert.equal(bash('export FOO=1'), 0, 'an assignment');
+  assert.equal(bash('declare -a arr'), 0, 'a declaration');
+  assert.equal(bash('declare -p CLAUDE_STACK_INSTRUMENT'), 0, 'a non-credential name');
+});
+
+test('guard-secret-value: a runtime handed the credential file, or building its path, is judged', () => {
+  const f = fixtures();
+  assert.equal(bash(`python3 -m json.tool ${f.secret}`), 2, 'the file as a bare argument');
+  assert.equal(bash(`perl -ne 'print' ${f.secret}`), 2, 'perl -ne');
+  assert.equal(bash(`perl -pe '' ${f.secret}`), 2, 'perl -pe');
+  assert.equal(bash(`python3 -c "import sys;print(open(sys.argv[1]).read())" ${f.secret}`), 2, 'argv[1]');
+  assert.equal(bash(`node -e "console.log(require('fs').readFileSync(process.argv[1],'utf8'))" ${f.secret}`), 2, 'process.argv[1]');
+  assert.equal(bash('node -e "const p=require(\'path\').join(require(\'os\').homedir(),\'.claude\',\'settings.json\');console.log(require(\'fs\').readFileSync(p,\'utf8\'))"'), 2, 'the account dir built at runtime - CLAUDE_CONFIG_DIR is the FAKE account this suite pins');
+  assert.equal(bash('python3 -c "import os;print(open(os.path.join(os.path.expanduser(\'~\'),\'.claude\',\'settings.json\')).read())"'), 2, 'the same in python');
+  assert.equal(bash('node -e "console.log(require(\'fs\').readFileSync(`' + f.secret + '`,\'utf8\'))"'), 2, 'a template literal');
+  assert.equal(bash(`node -e "console.log(require('fs').readFileSync('${f.clean}','utf8'))"`), 0, 'a clean file still passes');
+});
+
+test('guard-secret-value: a cd moves the anchor, and a heredoc feeding a runtime or a shell is code', () => {
+  const f = fixtures();
+  assert.equal(bash('cd .claude && cat settings-secret.json'), 2, 'a relative cd');
+  assert.equal(bash('cd sub && cat settings.json'), 2, 'the same file name lives in two directories');
+  assert.equal(bash(`cd ${ROOT}/sub; cat settings.json`), 2, 'an absolute cd, ; separated');
+  assert.equal(bash(`python3 - <<'EOF'\nimport json;print(json.load(open('${f.secret}')))\nEOF`), 2, 'a python heredoc');
+  assert.equal(bash(`node <<'EOF'\nconsole.log(require('fs').readFileSync('${f.secret}','utf8'))\nEOF`), 2, 'a node heredoc');
+  assert.equal(bash(`bash <<'EOF'\ncat ${f.secret}\nEOF`), 2, 'a shell heredoc');
+  assert.equal(bash('node - <<\'EOF\'\nconsole.log(process.env.SENTRY_ACCESS_TOKEN)\nEOF'), 2, 'a heredoc reading the environment');
+  assert.equal(bash(`cat <<'EOF' > ${path.join(f.dir, 'plan2.md')}\nStep 1: cat ${f.secret} to check the env block\nEOF`), 0, 'a document that MENTIONS a dump is still prose');
+});
+
+test('guard-secret-value: a glob and a path held in a shell variable resolve to the same file', () => {
+  const f = fixtures();
+  assert.equal(bash('cat .env*'), 2, 'a glob with no directory');
+  assert.equal(bash('cat .claude/*.json'), 2, 'a glob in the last component');
+  assert.equal(bash(`cat ${ROOT}/.claude/settings-*.json`), 2, 'an absolute glob');
+  assert.equal(bash(`cat ${ROOT}/.claude/settings-secret.js?n`), 2, 'a single-character glob');
+  assert.equal(bash(`cat ${ROOT}/.claude/{settings-secret,x}.json`), 2, 'brace alternatives');
+  assert.equal(bash(`f=${f.secret}; cat $f`), 2, 'a variable set one segment earlier');
+  assert.equal(bash(`f=${f.secret}; cat "$f"`), 2, 'quoted');
+  assert.equal(bash(`f=${f.secret}\ncat "$f"`), 2, 'across a newline');
+  assert.equal(bash('for f in .claude/*.json; do cat "$f"; done'), 2, 'a loop variable');
+  assert.equal(bash(`cat ${path.join(ROOT, '.claude', 'clean*.json')}`), 0, 'a glob matching only clean files');
+});
+
+test('guard-secret-value: a redirect to a terminal device is a dump, not a write into a file', () => {
+  const f = fixtures();
+  assert.equal(bash(`cat ${f.secret} > /dev/stdout`), 2, '/dev/stdout is the transcript');
+  assert.equal(bash(`cat ${f.secret} > /dev/stderr`), 2, '/dev/stderr too');
+  assert.equal(bash(`cat ${f.secret} >/dev/tty`), 2, '/dev/tty too');
+  assert.equal(bash(`cat ${f.secret} | tee /dev/stderr | wc -l`), 2, 'a tee stage prints before the reducer');
+  assert.equal(bash(`cat ${f.secret} | tee /dev/stderr > /dev/null`), 2, 'the same behind a /dev/null redirect');
+  assert.equal(bash(`cat ${f.secret} > ${path.join(f.dir, 'out.txt')}`), 0, 'a real file never reaches the context');
+});
+
+test('guard-secret-value: an exemption counts in its own stage only, never in a comment or an argument', () => {
+  const f = fixtures();
+  assert.equal(bash(`cat ${f.secret} # wc`), 2, 'a reducer named in a comment');
+  assert.equal(bash(`cat ${f.secret} # via guard-secret-value.js --presence`), 2, 'the accessor named in a comment');
+  assert.equal(bash(`cat ${f.secret} | grep -v wc`), 2, 'a reducer named in an argument');
+  assert.equal(bash(`node "${HOOK}" --presence ${f.secret} | cat ${f.secret}`), 2, 'a dump piped after the accessor');
+  assert.equal(bash(`cat ${f.secret} | wc -l`), 0, 'the reducer itself');
+  assert.equal(bash(`cat ${f.secret} | jq '.env | keys'`), 0, 'keys only');
+  assert.equal(bash(`grep -c TOKEN ${f.secret}`), 0, 'a count');
+});
+
+test('guard-secret-value: only a reduction to names or a count is presence', () => {
+  const f = fixtures();
+  assert.equal(bash('env | cut -d= -f2'), 2, 'field 2 is the value');
+  assert.equal(bash('env | cut -d= -f1-'), 2, 'f1- is every field');
+  assert.equal(bash("env | awk -F= '{print $2}'"), 2, 'awk field 2');
+  assert.equal(bash(`jq 'keys, .' ${f.secret}`), 2, 'a comma prints the document beside the keys');
+  assert.equal(bash(`jq '.env | length, .' ${f.secret}`), 2, 'the same behind a length');
+  assert.equal(bash('echo $(printenv SENTRY_ACCESS_TOKEN)'), 2, 'the second print verb in the stage');
+  assert.equal(bash('echo "$(printenv SENTRY_ACCESS_TOKEN)"'), 2, 'quoted substitution');
+  assert.equal(bash('env | cut -d= -f1 | sort'), 0, 'names only');
+  assert.equal(bash("env | awk -F= '{print $1}'"), 0, 'awk field 1');
+});
+
+test('guard-secret-value: the dump verbs outside the cat/head list print the same bytes', () => {
+  const f = fixtures();
+  assert.equal(bash(`tac ${f.secret}`), 2, 'tac');
+  assert.equal(bash(`nl ${f.secret}`), 2, 'nl');
+  assert.equal(bash(`base64 ${f.secret}`), 2, 'base64 is a reversible print');
+  assert.equal(bash(`xxd ${f.secret}`), 2, 'xxd');
+  assert.equal(bash(`tee /dev/stdout < ${f.secret}`), 2, 'tee reading a redirect');
+  assert.equal(bash(`while read l; do echo "$l"; done < ${f.secret}`), 2, 'a read loop over the file');
+  assert.equal(bash(`cp ${f.secret} ${path.join(f.dir, 'settings.bak')}`), 0, 'a backup is not a dump');
+});
