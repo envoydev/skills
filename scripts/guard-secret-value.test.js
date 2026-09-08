@@ -99,3 +99,14 @@ test('guard-secret-value: an inline runtime read of a credential file is the sam
   assert.equal(bash(`node -e "console.log(require('fs').existsSync('${f.secret}'))"`), 2, 'existence through a runtime resolves the file too - use --presence, which is exempt by name');
   assert.equal(bash(`node "${HOOK}" --presence "${f.secret}" SENTRY_ACCESS_TOKEN`), 0, 'the accessor itself is the sanctioned read');
 });
+
+test('guard-secret-value: quoting never hides a dump - operators inside quotes do not split, an unbalanced quote falls back to the quote-blind split', () => {
+  const f = fixtures();
+  assert.equal(bash(`echo "1 > 2 is true && cat ${f.secret}`), 2, 'an unterminated double quote cannot excuse the cat behind it');
+  assert.equal(bash(`echo 'it's fine && cat ${f.secret}`), 2, 'an unbalanced apostrophe');
+  assert.equal(bash(`echo "C:\\dir\\" && cat ${f.secret}`), 2, 'a backslash before the closing quote leaves it open - still judged');
+  assert.equal(bash(`echo "1 > 2 is true" && cat ${f.secret}`), 2, 'a balanced quote holding operators still splits at the real &&');
+  assert.equal(bash(`printf '%s;%s' a b; cat ${f.secret}`), 2, 'a ; inside quotes is data, the ; outside splits');
+  assert.equal(bash(`echo 'it'\\''s' && cat ${f.secret}`), 2, 'the shell apostrophe idiom');
+  assert.equal(bash(`python3 -c "import json;print(json.load(open('${f.clean}')))"`), 0, 'a clean file through a runtime with ; inside quotes');
+});

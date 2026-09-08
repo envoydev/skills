@@ -167,29 +167,33 @@ const RUNTIME = /\b(?:node|python3?|perl|ruby|deno|bun|pwsh|powershell)\b/;
 // the read the rule asks for; the segment passes as a whole.
 const PRESENCE_SHAPE = /\bwc\b|\b(?:grep|rg|egrep|fgrep)\s+(?:-\w*[clLq]\b|--count\b|--files-with-matches\b|--quiet\b)|\bjq\b[^\n]*\b(?:keys|length|has\()|\bcut\s+-d\s*=|\bawk\s+-F\s*=|\bsed\s+['"]s\/=\.\*\/\//;
 
-// Split on shell operators while respecting quoted strings.
-function splitSegments(command) {
+// Segments split on `&&`, `||`, `;` and newline OUTSIDE quotes: a runtime's inline code carries
+// `;` inside its quoted argument (`python3 -c "import json;print(...)"`), and a naive split
+// separated the runtime word from the segment holding the file path, so neither half matched.
+// FAIL SAFE: a quote left open at the end of the command (a typo, a truncated input, a `\` before
+// a closing quote) would otherwise swallow the rest of the command into one blob, where any
+// exemption substring could excuse a real dump (review finding) - so an unbalanced scan falls
+// back to the quote-blind split, which judges every operator-separated piece on its own.
+function splitSegments(cmd) {
   const segs = [];
-  let current = '';
-  let inSingle = false, inDouble = false, inBacktick = false;
-  for (let i = 0; i < command.length; i++) {
-    const c = command[i];
-    const prev = i > 0 ? command[i - 1] : '';
-    // Track quote state
-    if (c === "'" && prev !== '\\' && !inDouble && !inBacktick) inSingle = !inSingle;
-    else if (c === '"' && prev !== '\\' && !inSingle && !inBacktick) inDouble = !inDouble;
-    else if (c === '`' && prev !== '\\' && !inSingle && !inDouble) inBacktick = !inBacktick;
-    // Check for delimiters only outside quotes
-    if (!inSingle && !inDouble && !inBacktick) {
-      if ((c === ';' || c === '\n') || (c === '&' && command[i + 1] === '&') || (c === '|' && command[i + 1] === '|')) {
-        if (c !== '&' && c !== '|') { if (current.trim()) segs.push(current); current = ''; continue; }
-        else { if (current.trim()) segs.push(current); current = ''; i++; continue; }
-      }
+  let cur = '';
+  let quote = null; // the quote character we are inside, or null
+  for (let i = 0; i < cmd.length; i++) {
+    const ch = cmd[i];
+    if (quote) {
+      cur += ch;
+      if (ch === '\\' && quote === '"' && i + 1 < cmd.length) { cur += cmd[++i]; continue; } // an escaped char inside double quotes
+      if (ch === quote) quote = null;
+      continue;
     }
-    current += c;
+    if (ch === '\\' && i + 1 < cmd.length) { cur += ch + cmd[++i]; continue; } // an escaped char outside quotes
+    if (ch === '"' || ch === '\'') { quote = ch; cur += ch; continue; }
+    if (ch === '\n' || ch === ';') { segs.push(cur); cur = ''; continue; }
+    if ((ch === '&' || ch === '|') && cmd[i + 1] === ch) { segs.push(cur); cur = ''; i++; continue; }
+    cur += ch;
   }
-  if (current.trim()) segs.push(current);
-  return segs;
+  segs.push(cur);
+  return quote ? cmd.split(/&&|\|\||;|\n/) : segs;
 }
 
 // ---- Bash matcher ----
@@ -206,13 +210,7 @@ if (payload.tool_name === 'Bash') {
     // A dump verb or a runtime read on a file that HOLDS a credential - judged by content, not path.
     const candidates = [];
     if (DUMP_VERB.test(seg)) for (const tok of seg.split(/\s+/)) if (tok && !tok.startsWith('-') && /[\/.~$]/.test(tok)) candidates.push(tok);
-    if (RUNTIME.test(seg)) {
-      const extracted = new Set();
-      for (const m of seg.matchAll(/(["'])([^"'\n]{2,300})\1/g)) extracted.add(m[2]);
-      for (const m of seg.matchAll(/'([^']{2,300})'/g)) extracted.add(m[1]);
-      for (const m of seg.matchAll(/"([^"]{2,300})"/g)) extracted.add(m[1]);
-      for (const x of extracted) candidates.push(x);
-    }
+    if (RUNTIME.test(seg)) for (const m of seg.matchAll(/(["'])([^"'\n]{2,300})\1/g)) candidates.push(m[2]);
     for (const tok of candidates) {
       const file = resolveFile(tok);
       if (!file) continue;
