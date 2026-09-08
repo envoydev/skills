@@ -111,6 +111,20 @@ test('guard-stop-contract: status about a running job is not a pending decision'
   assert.equal(run('guard-stop-contract.js', { hook_event_name: 'Stop', transcript_path: plain }), 0);
 });
 
+test('guard-stop-contract: a suggestion close that says nothing is pending on the run is finished, not a stall', () => {
+  // The guided commands end on a next-steps card, not an ask: 'complete' + 'the next step' is the
+  // measured stall shape (PENDING_RE reads the singular; a model writing the card freely lands on
+  // it), and the one line that resolves it is the disclaimer - without it the same card stays blocked.
+  const card = 'Install complete - 9 skills, 4 agents, 11 hooks.\n\nSuggested next steps:\n'
+    + '1. Reload the session - the next step everything else depends on; nothing installed this run is live until the MCPs connect.\n'
+    + '2. `/project-agent-capabilities` - so the generated rule reflects the final inventory.\n\n'
+    + 'Nothing is pending on this run - these are yours to run when you choose.';
+  const sug = transcript('sug', [assistantRow('m6', card)]);
+  assert.equal(run('guard-stop-contract.js', { hook_event_name: 'Stop', transcript_path: sug }), 0, 'the disclaimer line makes the close a finished one');
+  const bare = transcript('bare', [assistantRow('m7', card.replace(/\n\nNothing is pending[^\n]*$/, ''))]);
+  assert.equal(run('guard-stop-contract.js', { hook_event_name: 'Stop', transcript_path: bare }), 2, 'the same card without the line is the measured stall');
+});
+
 test('guard-stop-contract: one turn split across rows sharing a message.id is judged whole', () => {
   // The defect this pins: keeping only the LAST row read a thinking-only fragment as the turn and
   // passed a real decision stop - measured in six audited sessions.

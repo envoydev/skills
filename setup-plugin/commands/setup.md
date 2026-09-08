@@ -182,17 +182,18 @@ Not required - open with WHERE it lives and WHAT a yes changes, then AskUserQues
 
 ## Post-check + next steps - close every run with this card
 
-**A next step that needs a USER ACTION in this session ends the turn in ONE AskUserQuestion.**
-A listed next step is a directive, and three of them shipped as prose in one session and all three
-were ignored. So after the card, put the steps the user must decide or run NOW - the session
-reload, the gitignore write, the account-file credential line, a manual-only capture skill -
-through AskUserQuestion as the turn's last act, one option per step plus 'nothing now'. Purely
-informational steps stay in the card and end nothing.
-Recommendation FIRST, in the question text itself - the step and the one reason it matters
-('Reload the session now? Nothing installed this run is live until the MCPs
-connect and the rules inject at launch'), never a contentless 'What now?' over a list. The report
-already did the deciding; the ask only collects consent, so the recommended option comes first
-and says it is recommended. The house form of this rule is the interaction baseline's.
+**The run closes on a suggestion card, never on a question.** The steps below that are the
+USER's to run - the session reload, the account-file credential line, the capture sequence,
+the serena index - are listed as suggestions, the one everything depends on first and each with
+the one reason it matters ('Reload the session - nothing installed this run is live until the
+MCPs connect and the rules inject at launch'). No AskUserQuestion over them: the walk's asks end
+with the installer, and the closing ask over follow-ups was dropped as friction - the user's
+call, made knowing a prose next step was ignored 3 of 3 in one audited session, which is why the
+reason rides beside every step. The gitignore write in item 1 keeps its own consent ask - it is
+a write, not a suggestion. Close the card with this line, verbatim: 'Nothing is pending on this
+run - these are yours to run when you choose.' The stop-contract guard reads that sentence as a
+finished close; without it a 'done + next step' card is blocked as a stall and the guard demands
+the very ask this paragraph removes.
 
 Report what still needs a hand: LSP tools (`csharp-ls` via `dotnet tool install -g csharp-ls` on a .NET setup), the `/claude-hud:setup` statusline step, and that the first `claude plugin install` may prompt to trust. Then, AFTER the summary, print the next-steps card - built from what THIS run actually installed, never naming a command whose skill is absent. The card opens with the one step everything else depends on - reload the session (MCPs connect and skills/agents/rules inject at launch; nothing installed this run is live until then) - and closes by naming `${CLAUDE_PLUGIN_ROOT}/references/post-install.md` as the durable copy the user can re-read later (it adds the serena setup prompt and the gitignore semantics):
 

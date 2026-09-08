@@ -220,17 +220,18 @@ serena-agent serena project index`. Never invoke it from this run - the skill is
 Skill call is blocked (measured: an update run tried and the harness refused it); the report
 line is the mechanism.
 
-**A next step that needs a USER ACTION in this session ends the turn in ONE AskUserQuestion.**
-A listed next step is a directive, and three of them shipped as prose in one session and all
-three were ignored. So: after the report, if any listed step is something the user must decide
-or run now - re-index serena, run a manual-only capture skill, restart for an MCP change, rotate
-a credential - put those steps through AskUserQuestion as the turn's last act, one option per
-step plus 'nothing now'. Steps that are purely informational stay in the report and end nothing.
-Recommendation FIRST, in the question text itself - the step and the one reason it matters
-('Re-run `/project-agent-capabilities`? The update refreshed 12 skill files, so
-the generated rule's stamped sentences are stale'), never a contentless 'What now?' over a list. The report
-already did the deciding; the ask only collects consent, so the recommended option comes first
-and says it is recommended. The house form of this rule is the interaction baseline's.
+**The run closes on a suggestion card, never on a question.** After the report, list the
+follow-ups that are the USER's to run - restart for an MCP change, `/project-agent-capabilities`
+(when installed), a manual-only capture, the serena re-index, a credential to rotate or set by
+hand - as `Suggested next steps`, the recommended one first and each with the one reason it
+matters ('`/project-agent-capabilities` - the update refreshed 12 skill files, so the generated
+rule's stamped sentences are stale'). No AskUserQuestion over them: an update asks nothing by
+design, and the closing ask over follow-ups was dropped as friction - the user's call, made
+knowing a prose next step was ignored 3 of 3 in one audited session, which is why the reason
+rides beside every step. Close with this line, verbatim:
+'Nothing is pending on this run - these are yours to run when you choose.' The stop-contract
+guard reads that sentence as a finished close; without it a 'done + next step' card is blocked
+as a stall and the guard demands the very ask this paragraph removes.
 
 ## 8. Clean up the temp dir - ALWAYS
 Remove `$TMP` per `${CLAUDE_PLUGIN_ROOT}/references/source-protocol.md`, on EVERY exit path:

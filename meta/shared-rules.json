@@ -3242,28 +3242,28 @@
         }
       ]
     },
-    "next-step-ask-recommendation-first": {
-      "_note": "An AskUserQuestion's question TEXT carries the recommendation - the action plus the one reason it matters - never a contentless opener ('What now?') over a list of options, which hands back the deciding the report just did. Canonical in the always-on interaction baseline (every session and subagent, refreshed by `update`); the four guided commands restate it at their closing next-steps ask, where the failure was measured, each with its OWN example.",
+    "suggestion-close-nothing-pending": {
+      "_note": "The four guided commands close on a suggestion card, not an ask, and end it with ONE verbatim line that the stop-contract guard's NOTHING_PENDING_RE reads as a finished close - without it a 'done + next step' card is the measured stall shape and the guard demands the ask the commands removed. The hook owns the sentence (its regex is the contract); the commands carry the copy the model prints. Change the wording in all five or the guard starts blocking every walk's close. The ask-carries-the-recommendation rule this replaced stays canonical in the interaction baseline; the commands no longer ask at the close, so they no longer restate it.",
       "owner": {
-        "file": "stack/rules/baseline-interaction.md",
-        "marker": "never a contentless opener"
+        "file": "stack/hooks/guard-stop-contract.js",
+        "marker": "Nothing is pending on this run - these are yours to run when you choose."
       },
       "sites": [
         {
           "file": "setup-plugin/commands/setup.md",
-          "marker": "never a contentless 'What now?' over a list"
+          "marker": "Nothing is pending on this run - these are yours to run when you choose."
         },
         {
           "file": "setup-plugin/commands/configure.md",
-          "marker": "never a contentless 'What now?' over a list"
+          "marker": "Nothing is pending on this run - these are yours to run when you choose."
         },
         {
           "file": "setup-plugin/commands/update.md",
-          "marker": "never a contentless 'What now?' over a list"
+          "marker": "Nothing is pending on this run - these are yours to run when you choose."
         },
         {
           "file": "setup-plugin/commands/validate.md",
-          "marker": "never a contentless 'What now?' over a list"
+          "marker": "Nothing is pending on this run - these are yours to run when you choose."
         }
       ]
     }
