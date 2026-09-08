@@ -31,6 +31,16 @@ function transcript(name, rows) {
 // exercise the layers point it at a fixture of their own.
 process.env.CLAUDE_CONFIG_DIR = fs.mkdtempSync(path.join(TMP, 'acct-'));
 delete process.env.CLAUDE_STACK_CONTEXT_WINDOW;
+// Every guard appends a block row to `<root>/<docs-path>/hook-blocks/`, where the root falls back
+// to the process cwd when CLAUDE_PROJECT_DIR is unset - so a suite run from this checkout forged
+// 4MB of field ledger into the repo's own `.claude/docs/hook-blocks/` (measured 2026-09-07: 12,480
+// rows in nosession.jsonl alone). Pin a scratch root for the whole run; the cases that exercise the
+// ledger, or a gate that reads a receipt under the root, point it at a fixture of their own.
+process.env.CLAUDE_PROJECT_DIR = fs.mkdtempSync(path.join(TMP, 'root-'));
+// Three cases below deliberately anchor on THIS repo (a real project does not live in the temp
+// tree - that is what proves the containment rule, and the cwd fallback), so the root pin cannot
+// help them. They redirect the LEDGER instead: an absolute docs root none of those guards reads.
+const LEDGER = path.join(TMP, 'ledger');
 
 const assistantRow = (id, text, usage) => ({ type: 'assistant', message: { id, content: [{ type: 'text', text }], usage: usage || { cache_read_input_tokens: 10 } } });
 
@@ -194,7 +204,7 @@ test('guard-read-whole-file: the Read matcher gates whole-file shapes and the cu
 });
 
 test('guard-read-whole-file: runtime dumps, file redirects, multi-file cats and unresolvable paths on Bash', () => {
-  const noRoot = { ...process.env, CLAUDE_PROJECT_DIR: '' };
+  const noRoot = { ...process.env, CLAUDE_PROJECT_DIR: '', CLAUDE_STACK_DOCS_PATH: LEDGER };
   assert.equal(bash('guard-read-whole-file.js', `node -e "console.log(require('fs').readFileSync('${BIG}','utf8'))"`), 2, 'node readFileSync dump');
   assert.equal(bash('guard-read-whole-file.js', `ruby -e "puts File.read('${BIG}')"`), 2, 'ruby File.read dump');
   assert.equal(bash('guard-read-whole-file.js', `cat ${BIG} > ${path.join(TMP, 'copy.js')}`), 0, 'a redirect into a file is a copy, not a dump');
@@ -714,7 +724,7 @@ test('guard-cross-project-write: the session\'s own scratch and the account dir 
   // root - the fixtures above deliberately do, which is what proves the containment rule.
   const repoRoot = path.join(__dirname, '..');
   const inRepo = (payload) => spawnSync(process.execPath, [path.join(HOOKS, 'guard-cross-project-write.js')],
-    { input: JSON.stringify(payload), encoding: 'utf8', env: { ...process.env, CLAUDE_PROJECT_DIR: repoRoot, CLAUDE_STACK_ALLOW_WRITE_OUTSIDE: '' } }).status;
+    { input: JSON.stringify(payload), encoding: 'utf8', env: { ...process.env, CLAUDE_PROJECT_DIR: repoRoot, CLAUDE_STACK_ALLOW_WRITE_OUTSIDE: '', CLAUDE_STACK_DOCS_PATH: LEDGER } }).status;
   const w = (f) => inRepo({ tool_name: 'Write', tool_input: { file_path: f } });
 
   assert.equal(w(path.join(os.tmpdir(), 'scratch', 'notes.md')), 0, 'the harness scratchpad');
@@ -866,7 +876,7 @@ test('guard-cross-project-write: space account dirs, ~ in the allowance, and unr
   const home = os.homedir();
   const repoRoot = path.join(__dirname, '..');
   const inRepo = (payload, env = {}) => spawnSync(process.execPath, [path.join(HOOKS, 'guard-cross-project-write.js')],
-    { input: JSON.stringify(payload), encoding: 'utf8', env: { ...process.env, CLAUDE_PROJECT_DIR: repoRoot, CLAUDE_STACK_ALLOW_WRITE_OUTSIDE: '', ...env } }).status;
+    { input: JSON.stringify(payload), encoding: 'utf8', env: { ...process.env, CLAUDE_PROJECT_DIR: repoRoot, CLAUDE_STACK_ALLOW_WRITE_OUTSIDE: '', CLAUDE_STACK_DOCS_PATH: LEDGER, ...env } }).status;
   if (home) {
     // A --space install keeps its memory under ~/.claude-<space>; the old check disabled that
     // allowance for every project living under HOME, i.e. every real project (reproduced).
