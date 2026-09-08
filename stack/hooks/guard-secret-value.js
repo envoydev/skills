@@ -36,13 +36,32 @@ const MAX_BYTES = 512 * 1024; // a credential file is small; anything larger is 
 const isPlaceholder = (v) => typeof v === 'string' && /^\$\{[^}]*\}$/.test(v.trim());
 const isLive = (v) => typeof v === 'string' && v.trim() !== '' && !isPlaceholder(v);
 
+// CONTENT tells that a credential-shaped KEY is not holding a credential - the false positives the
+// key name alone cannot separate (measured on real projects): an i18n bundle's `"password":
+// "Password"`, an MV3 manifest's `"key": "MIIB..."` (a PUBLIC key), a `.env.example`'s
+// `API_KEY=your-api-key-here`. A value that repeats its own key, carries whitespace (a label, not a
+// token), reads as placeholder vocabulary, or starts with `MII` (DER/base64 public key) is a sample.
+// These apply to the FILE judgement only - `--presence` still reports a placeholder as such, since
+// there the placeholder IS the answer. Accepted gap: a test fixture holding a fake credential under
+// a credential-shaped key (`"apiKey": "test-key-1234"`) has no content tell and still blocks - read
+// it through `--presence`, or rename the key.
+const TEMPLATE_VALUE = /^(?:your[-_]|<[^>]+>$|changeme|x{3,}$|\.\.\.$|todo|replace|example|dummy|placeholder)/i;
+const isSampleValue = (key, v) => {
+  const s = String(v).trim();
+  return s.toLowerCase() === String(key).toLowerCase() || /\s/.test(s) || TEMPLATE_VALUE.test(s) || s.startsWith('MII');
+};
+const holdsCredential = (key, v) => isLive(v) && !isSampleValue(key, v);
+// A file-SHAPE tell: a basename ending .example / .sample / .template / .dist ships the KEYS, never
+// the values - judging it blocks the one file a session legitimately reads to learn what to fill in.
+const TEMPLATE_FILE = /\.(?:example|sample|template|dist)$/i;
+
 // The dotted path of the first credential-shaped key holding a live string, or null. Depth-capped:
 // a settings file is shallow, and the cap keeps a pathological JSON from costing the call.
 function secretKeyIn(node, prefix, depth) {
   if (!node || typeof node !== 'object' || depth > 6) return null;
   for (const [k, v] of Object.entries(node)) {
     const here = prefix ? `${prefix}.${k}` : k;
-    if (typeof v === 'string') { if (SECRET_KEY_RE.test(k) && isLive(v)) return here; }
+    if (typeof v === 'string') { if (SECRET_KEY_RE.test(k) && holdsCredential(k, v)) return here; }
     else { const hit = secretKeyIn(v, here, depth + 1); if (hit) return hit; }
   }
   return null;
@@ -52,7 +71,7 @@ const unquote = (v) => v.trim().replace(/^(["'])(.*)\1$/, '$2');
 function secretLineIn(text) {
   for (const line of text.split('\n')) {
     const m = line.match(DOTENV_LINE);
-    if (m && SECRET_KEY_RE.test(m[1]) && isLive(unquote(m[2]))) return m[1];
+    if (m && SECRET_KEY_RE.test(m[1]) && holdsCredential(m[1], unquote(m[2]))) return m[1];
   }
   return null;
 }
@@ -61,6 +80,7 @@ function secretLineIn(text) {
 // is never a credential file here (source dumps are guard-read-whole-file's concern).
 function secretIn(file) {
   let text;
+  if (TEMPLATE_FILE.test(pathMod.basename(String(file)))) return null;
   try {
     if (fs.statSync(file).size > MAX_BYTES) return null;
     text = fs.readFileSync(file, 'utf8').replace(/^\uFEFF/, '');
@@ -86,16 +106,21 @@ const KNOWN_VARS = () => ({
 });
 function expandPath(token) {
   const known = KNOWN_VARS();
-  let p = String(token).replace(/^["']|["']$/g, '').replace(/^~(?=\/|$)/, HOME);
+  let p = String(token).replace(/^["'`]|["'`]$/g, '').replace(/^~(?=\/|$)/, HOME);
   p = p.replace(/\$\{(\w+)(?::-[^}]*)?\}|\$(\w+)/g, (m, a, b) => (known[a || b] != null ? known[a || b] : m));
-  return /\$/.test(p) ? null : nativePath(p);
+  // `my\ dir/settings.json` is one token the shell hands over with the space intact.
+  return /\$/.test(p) ? null : nativePath(p.replace(/\\ /g, ' '));
 }
 let payload; // set below; resolveFile reads its cwd
+// The anchors a relative path is tried against. A payload field is attacker-shaped input, not a
+// promise: a non-string `cwd` reached pathMod.join and threw ERR_INVALID_ARG_TYPE, and a hook that
+// exits 1 fails OPEN - the dump it was judging ran (review finding, reproduced with `"cwd": 5`).
+const anchorDirs = () => [process.env.CLAUDE_PROJECT_DIR, payload && payload.cwd, process.cwd()]
+  .filter((d) => typeof d === 'string' && d);
 function resolveFile(token) {
   const p = expandPath(token);
   if (!p || p === '' ) return null;
-  const anchors = [process.env.CLAUDE_PROJECT_DIR, payload && payload.cwd, process.cwd()].filter(Boolean);
-  const cands = pathMod.isAbsolute(p) ? [p] : anchors.map((d) => pathMod.join(d, p));
+  const cands = pathMod.isAbsolute(p) ? [p] : anchorDirs().map((d) => pathMod.join(d, p));
   for (const c of cands) { try { if (fs.statSync(c).isFile()) return c; } catch { /* next anchor */ } }
   return null;
 }
@@ -231,6 +256,24 @@ const splitSegments = (cmd) => splitOutsideQuotes(cmd,
 // A segment is a PIPELINE: its stages split on a single `|` (`||` never reaches here - splitSegments
 // consumed it), and a print verb's arguments end at its own stage.
 const splitPipes = (seg) => splitOutsideQuotes(seg, (t, i) => (t[i] === '|' ? 1 : 0), (t) => t.split('|'));
+// Words split on whitespace OUTSIDE quotes: a naive `\s+` split cut `cat "<project>/my dir/x.json"`
+// into three tokens, none of them a path, and CLAUDE.md supports a project path with a space - so
+// that was an environment condition, not a chosen bypass.
+const shellTokens = (s) => splitOutsideQuotes(s, (t, i) => (/\s/.test(t[i]) ? 1 : 0), (t) => t.split(/\s+/)).filter(Boolean);
+
+// A runtime reads the environment in its own spelling - the same leak as `echo $SECRET`, which the
+// file-path scan never looked for (review finding: every shape below passed). A NAMED read is
+// judged by the name; a whole-environment object beside a print is the env dump.
+const ENV_NAMED = [
+  /process\.env(?:\.|\[\s*['"])(\w+)/g,
+  /os\.environ(?:\.get\()?\s*\[?\s*['"](\w+)/g,
+  /\bENV\[\s*['"](\w+)/g,
+  /\$ENV\{\s*['"]?(\w+)/g,
+];
+const ENV_BARE = /process\.env(?![.[\w])|os\.environ(?![.[\w(])|%ENV\b|\bENV\.(?:to_h|each)\b/;
+// Names without values is the presence read, in a runtime as much as in a shell pipeline.
+const ENV_REDUCED = /Object\.keys\(\s*process\.env\s*\)|os\.environ\.keys\(\s*\)|\bENV\.keys\b/g;
+const RUNTIME_PRINT = /console\.log|JSON\.stringify|\bprint\s*\(|\bputs\b|(?:^|\s)-p(?=\s|$)|--print\b/;
 
 // ---- Bash matcher ----
 if (payload.tool_name === 'Bash') {
@@ -277,9 +320,27 @@ if (payload.tool_name === 'Bash') {
         '[ -n "$NAME" ] && echo "NAME=set (${#NAME} chars)" || echo "NAME=absent".\n');
     }
 
+    // A runtime reading the environment - `node -e "console.log(process.env.SENTRY_ACCESS_TOKEN)"`
+    // is `echo $SENTRY_ACCESS_TOKEN` with more syntax. The denial names the VARIABLE, never a value.
+    if (RUNTIME.test(seg)) {
+      for (const re of ENV_NAMED) {
+        for (const m of seg.matchAll(re)) {
+          if (SECRET_KEY_RE.test(m[1])) {
+            block(`Blocked: \`${m[1]}\` is a credential-shaped variable and this prints its value.\n` +
+              `Presence only: [ -n "$${m[1]}" ] && echo "${m[1]}=set (\${#${m[1]}} chars)" || echo "${m[1]}=absent"\n`);
+          }
+        }
+      }
+      if (ENV_BARE.test(seg.replace(ENV_REDUCED, ' keys ')) && RUNTIME_PRINT.test(seg)) {
+        block('Blocked: a whole-environment dump (env / printenv) prints every exported credential.\n' +
+          'Names only: env | cut -d= -f1. One non-secret variable: printenv NAME. A credential: presence only,\n' +
+          '[ -n "$NAME" ] && echo "NAME=set (${#NAME} chars)" || echo "NAME=absent".\n');
+      }
+    }
+
     // A dump verb or a runtime read on a file that HOLDS a credential - judged by content, not path.
     const candidates = [];
-    if (DUMP_VERB.test(seg)) for (const tok of seg.split(/\s+/)) if (tok && !tok.startsWith('-') && /[\/.~$]/.test(tok)) candidates.push(tok);
+    if (DUMP_VERB.test(seg)) for (const tok of shellTokens(seg)) if (!tok.startsWith('-') && /[\/.~$]/.test(tok)) candidates.push(tok);
     if (RUNTIME.test(seg)) for (const m of seg.matchAll(/(["'])([^"'\n]{2,300})\1/g)) candidates.push(m[2]);
     for (const tok of candidates) {
       const file = resolveFile(tok);

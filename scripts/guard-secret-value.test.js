@@ -16,14 +16,42 @@ process.env.CLAUDE_PROJECT_DIR = fs.mkdtempSync(path.join(TMP, 'root-'));
 const LEDGER = path.join(TMP, 'ledger');
 process.env.CLAUDE_STACK_DOCS_PATH = LEDGER;
 
-const FAKE_TOKEN = 'x'.repeat(40); // obviously not a credential shape; the KEY name is what the guard judges
+// Fake by construction, and deliberately NOT a run of one character: a value that is just `xxx...`
+// is a placeholder by content, which the guard's own template tells now read as 'not live'.
+const FAKE_TOKEN = 'x0'.repeat(20); // 40 chars; the KEY name is what the guard judges
+const SECRET_JSON = JSON.stringify({ env: { SENTRY_SLUG: 'acme', SENTRY_ACCESS_TOKEN: FAKE_TOKEN }, hooks: {} }, null, 2);
+
+// A project tree under the pinned CLAUDE_PROJECT_DIR - the anchor a relative path, a `cd` and a
+// glob resolve against.
+const ROOT = process.env.CLAUDE_PROJECT_DIR;
+fs.mkdirSync(path.join(ROOT, '.claude'), { recursive: true });
+fs.writeFileSync(path.join(ROOT, '.claude', 'settings-secret.json'), SECRET_JSON);
+fs.writeFileSync(path.join(ROOT, '.claude', 'clean.json'), JSON.stringify({ env: { CLAUDE_STACK_DOCS_PATH: '.claude/docs' } }, null, 2));
+fs.mkdirSync(path.join(ROOT, 'my dir'), { recursive: true });
+fs.writeFileSync(path.join(ROOT, 'my dir', 'settings.json'), SECRET_JSON);
+fs.writeFileSync(path.join(ROOT, '.env'), 'API_KEY=abc123\n');
+fs.mkdirSync(path.join(ROOT, 'sub'), { recursive: true });
+fs.writeFileSync(path.join(ROOT, 'sub', 'settings.json'), SECRET_JSON);
+// A FAKE account dir. The real ~/.claude holds live credentials and is never read by this suite -
+// CLAUDE_CONFIG_DIR is what the hook resolves an account-dir path against, so pin it here.
+const ACCOUNT = fs.mkdtempSync(path.join(TMP, 'account-'));
+fs.writeFileSync(path.join(ACCOUNT, 'settings.json'), SECRET_JSON);
+process.env.CLAUDE_CONFIG_DIR = ACCOUNT;
 
 function fixtures() {
   const dir = fs.mkdtempSync(path.join(TMP, 'fx-'));
   const w = (name, content) => { const p = path.join(dir, name); fs.writeFileSync(p, content); return p; };
+  const wd = (sub, name, content) => { fs.mkdirSync(path.join(dir, sub), { recursive: true }); const p = path.join(dir, sub, name); fs.writeFileSync(p, content); return p; };
   return {
     dir,
-    secret: w('settings.json', JSON.stringify({ env: { SENTRY_SLUG: 'acme', SENTRY_ACCESS_TOKEN: FAKE_TOKEN }, hooks: {} }, null, 2)),
+    secret: w('settings.json', SECRET_JSON),
+    spaced: wd('my dir', 'settings.json', SECRET_JSON),
+    // The ordinary project files the content test must NOT read as credential files.
+    i18n: w('en.json', JSON.stringify({ login: { password: 'Password', apiKey: 'API key' } }, null, 2)),
+    manifest: w('manifest.json', JSON.stringify({ manifest_version: 3, key: 'MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA' }, null, 2)),
+    envExample: w('.env.example', 'API_KEY=your-api-key-here\nDB_PASSWORD=<your-password>\nSMTP_SECRET=changeme\n'),
+    envSample: w('config.json.sample', JSON.stringify({ apiKey: 'abc123' }, null, 2)),
+    testFixture: w('client.json', JSON.stringify({ apiKey: 'test-key-1234' }, null, 2)),
     clean: w('clean-settings.json', JSON.stringify({ env: { CLAUDE_STACK_DOCS_PATH: '.claude/docs', CLAUDE_STACK_PUSH_GATE: '1' }, hooks: {} }, null, 2)),
     mcp: w('.mcp.json', JSON.stringify({ mcpServers: { context7: { env: { CONTEXT7_API_KEY: '${CONTEXT7_API_KEY}' } } } }, null, 2)),
     dotenv: w('.env', 'DB_HOST=localhost\nAPI_KEY=abc123\n'),
@@ -171,6 +199,47 @@ test('guard-secret-value: the Read tool on a file that holds a credential is blo
   const r = run({ tool_name: 'Read', tool_input: { file_path: f.secret }, session_id: 'suite' });
   assert.match(r.stderr, /env\.SENTRY_ACCESS_TOKEN/);
   assert.doesNotMatch(r.stderr, new RegExp(FAKE_TOKEN));
+  assert.equal(run({ tool_name: 'Read', tool_input: { file_path: f.secret, offset: 1, limit: 2 }, session_id: 'suite' }).status, 2, 'a ranged Read reads the same value');
+  assert.equal(read(path.join('.claude', 'settings-secret.json')), 2, 'a relative file_path resolves against CLAUDE_PROJECT_DIR');
+});
+
+test('guard-secret-value: a runtime printing an environment variable is the same leak as echo $VAR', () => {
+  assert.equal(bash('node -e "console.log(process.env.SENTRY_ACCESS_TOKEN)"'), 2, 'process.env.NAME');
+  assert.equal(bash('node -p process.env.SENTRY_ACCESS_TOKEN'), 2, 'node -p of one variable');
+  assert.equal(bash('node -p process.env'), 2, 'node -p of the whole environment');
+  assert.equal(bash('python3 -c "import os;print(os.environ.get(\'SENTRY_ACCESS_TOKEN\'))"'), 2, 'os.environ.get');
+  assert.equal(bash('python3 -c "import os;print(os.environ[\'SENTRY_ACCESS_TOKEN\'])"'), 2, 'os.environ[NAME]');
+  assert.equal(bash('python3 -c "import os;print(os.environ)"'), 2, 'the whole environment through python');
+  assert.equal(bash('ruby -e \'puts ENV["SENTRY_ACCESS_TOKEN"]\''), 2, 'ruby ENV[NAME]');
+  assert.equal(bash('perl -e \'print $ENV{SENTRY_ACCESS_TOKEN}\''), 2, 'perl $ENV{NAME}');
+  assert.equal(bash('node -e "console.log(process.env.HOME)"'), 0, 'a non-credential variable');
+  assert.equal(bash('node -e "console.log(Object.keys(process.env))"'), 0, 'names only is presence');
+});
+
+test('guard-secret-value: a quoted or escaped path with a space stays one token', () => {
+  const f = fixtures();
+  assert.equal(bash(`cat "${f.spaced}"`), 2, 'double-quoted');
+  assert.equal(bash(`cat '${f.spaced}'`), 2, 'single-quoted');
+  assert.equal(bash(`cat ${f.spaced.replace(/ /g, '\\ ')}`), 2, 'backslash-escaped');
+  assert.equal(bash('cat "$CLAUDE_PROJECT_DIR/my dir/settings.json"'), 2, 'a variable expanding to a path with a space');
+});
+
+test('guard-secret-value: a label, a template value and a public key are not live credentials', () => {
+  const f = fixtures();
+  assert.equal(bash(`cat ${f.i18n}`), 0, 'an i18n bundle whose value repeats its key');
+  assert.equal(read(f.i18n), 0, 'the same through Read');
+  assert.equal(bash(`cat ${f.manifest}`), 0, 'the MV3 manifest key is a PUBLIC key');
+  assert.equal(read(f.manifest), 0, 'the same through Read');
+  assert.equal(bash(`cat ${f.envExample}`), 0, 'a .env.example is a template by name and by value');
+  assert.equal(read(f.envExample), 0, 'the same through Read');
+  assert.equal(bash(`cat ${f.envSample}`), 0, 'a .sample basename is a template');
+  assert.equal(bash(`cat ${f.testFixture}`), 2, 'accepted: no content tell separates a fake test credential from a real one - the --presence route reads it');
+});
+
+test('guard-secret-value: a malformed cwd never crashes the gate', () => {
+  const rel = path.join('.claude', 'settings-secret.json');
+  assert.equal(run({ tool_name: 'Bash', tool_input: { command: `cat ${rel}` }, cwd: 5, session_id: 'suite' }).status, 2, 'a numeric cwd - judged against the remaining anchors');
+  assert.equal(run({ tool_name: 'Bash', tool_input: { command: `cat ${rel}` }, cwd: { a: 1 }, session_id: 'suite' }).status, 2, 'an object cwd');
 });
 
 const presence = (...args) => spawnSync(process.execPath, [HOOK, '--presence', ...args], { encoding: 'utf8' });

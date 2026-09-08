@@ -123,7 +123,7 @@ environment area.
 
 Presence, never the value - run this and paste its lines as-is:
 `node .claude/hooks/guard-secret-value.js --presence "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/settings.json" SENTRY_SLUG SENTRY_ACCESS_TOKEN CONTEXT7_API_KEY`
-(global scope: the same file under the account dir's `hooks/`; Windows: `node .claude\hooks\guard-secret-value.js --presence "$env:USERPROFILE\.claude\settings.json" ...`). Output is `KEY=set (N chars)` or `KEY=absent`.
+(global scope: the same file under the account dir's `hooks/`; the same line runs on Windows - Claude Code's Bash tool is Git Bash, where `$env:USERPROFILE` is not a variable). Output is `KEY=set (N chars)` or `KEY=absent`.
 
 **Generated docs & data** - the capture output under `<docs-path>` (resolve the root exactly
 as the docs-root rule states) plus serena's local memory:

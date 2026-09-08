@@ -163,7 +163,7 @@ The sentry values are ACCOUNT-level, not project-level: `--sentry-slug` writes `
 
 Presence, never the value - run this and paste its lines as-is:
 `node "$TMP/repo/stack/hooks/guard-secret-value.js" --presence "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/settings.json" SENTRY_SLUG SENTRY_ACCESS_TOKEN CONTEXT7_API_KEY`
-(Windows: `node "$TMP\repo\stack\hooks\guard-secret-value.js" --presence "$env:USERPROFILE\.claude\settings.json" SENTRY_SLUG SENTRY_ACCESS_TOKEN CONTEXT7_API_KEY`; a `--space <name>` install reads `~/.claude-<name>/settings.json`). Output is `KEY=set (N chars)` or `KEY=absent` - nothing else is ever printed, and a dump of that file by any other route is blocked by the same hook.
+(the same line runs on Windows - Claude Code's Bash tool is Git Bash, where `$env:USERPROFILE` is not a variable; a `--space <name>` install reads `~/.claude-<name>/settings.json`). Output is `KEY=set (N chars)` or `KEY=absent` - nothing else is ever printed, and a dump of that file by any other route is blocked by the same hook.
 
 Then apply the step-1 environment choices where they differ from what the installer left: a merge on the scope's settings.json touching ONLY the chosen keys - every key screen B asked about (the catalog's rows, `env.` prefixed) (plus `autoCompactEnabled: false` when the user chose 'off'; delete the pct override in that case rather than writing a dead value) - everything else in the file preserved. The installer seeds these only when absent, so the values written here are the user's and survive every later update untouched. Accepted defaults on a fresh install need no write - the installer's seed already matches.
 
