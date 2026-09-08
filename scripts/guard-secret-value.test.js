@@ -172,3 +172,22 @@ test('guard-secret-value: the Read tool on a file that holds a credential is blo
   assert.match(r.stderr, /env\.SENTRY_ACCESS_TOKEN/);
   assert.doesNotMatch(r.stderr, new RegExp(FAKE_TOKEN));
 });
+
+const presence = (...args) => spawnSync(process.execPath, [HOOK, '--presence', ...args], { encoding: 'utf8' });
+
+test('guard-secret-value --presence: reports set (N chars) or absent, never a value', () => {
+  const f = fixtures();
+  const r = presence(f.secret, 'SENTRY_ACCESS_TOKEN', 'SENTRY_SLUG', 'CONTEXT7_API_KEY');
+  assert.equal(r.status, 0);
+  assert.equal(r.stdout, 'SENTRY_ACCESS_TOKEN=set (40 chars)\nSENTRY_SLUG=set (4 chars)\nCONTEXT7_API_KEY=absent\n');
+  assert.doesNotMatch(r.stdout + r.stderr, new RegExp(FAKE_TOKEN));
+  assert.equal(presence(f.secret).stdout, 'SENTRY_SLUG=set (4 chars)\nSENTRY_ACCESS_TOKEN=set (40 chars)\n', 'no keys: every env key, in file order');
+  assert.equal(presence(f.dotenv, 'API_KEY', 'DB_HOST').stdout, 'API_KEY=set (6 chars)\nDB_HOST=set (9 chars)\n', 'dotenv');
+  assert.equal(presence(f.emptyDotenv, 'API_KEY').stdout, 'API_KEY=absent\n', 'an empty value is absent');
+  assert.equal(presence(f.mcp, 'CONTEXT7_API_KEY').stdout, 'CONTEXT7_API_KEY=absent\n', 'no env block and no top-level key');
+  const missing = presence(path.join(f.dir, 'nope.json'), 'SENTRY_SLUG');
+  assert.equal(missing.status, 0);
+  assert.equal(missing.stdout, `# ${path.join(f.dir, 'nope.json')}: not found\nSENTRY_SLUG=absent\n`);
+  const tilde = presence('~/.this-file-does-not-exist-guard-secret-value.json', 'X');
+  assert.match(tilde.stdout, /^# .*\.this-file-does-not-exist-guard-secret-value\.json: not found\nX=absent\n$/, '~ is expanded');
+});

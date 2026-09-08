@@ -100,6 +100,34 @@ function resolveFile(token) {
   return null;
 }
 
+// ---- CLI mode: the sanctioned presence-only read --------------------------------------------
+// `node guard-secret-value.js --presence <file> [KEY ...]` - what the denials and the guided
+// commands name. Prints a length or `absent`, never a value; a missing file is reported, not thrown.
+if (process.argv[2] === '--presence') {
+  const fileArg = String(process.argv[3] || '');
+  const keys = process.argv.slice(4);
+  const file = nativePath(fileArg.replace(/^~(?=\/|$)/, HOME));
+  const out = [];
+  let text = null;
+  try { text = fs.readFileSync(file, 'utf8').replace(/^\uFEFF/, ''); } catch { out.push(`# ${fileArg}: not found`); }
+  let entries = {};
+  if (text != null) {
+    try {
+      const j = JSON.parse(text);
+      entries = (j && typeof j.env === 'object' && j.env) ? j.env : (j && typeof j === 'object' && !Array.isArray(j) ? j : {});
+    } catch {
+      for (const line of text.split('\n')) { const m = line.match(DOTENV_LINE); if (m) entries[m[1]] = unquote(m[2]); }
+    }
+  }
+  const names = keys.length ? keys : Object.keys(entries).filter((k) => typeof entries[k] === 'string');
+  for (const k of names) {
+    const v = entries[k];
+    out.push(isLive(v) ? `${k}=set (${v.length} chars)` : isPlaceholder(v) ? `${k}=absent (placeholder ${v.trim()})` : `${k}=absent`);
+  }
+  process.stdout.write(out.length ? out.join('\n') + '\n' : '');
+  process.exit(0);
+}
+
 try {
   payload = JSON.parse(fs.readFileSync(0, 'utf8'));
 } catch {
