@@ -28,6 +28,7 @@
    "guard-protected-force-push",
    "guard-catastrophic-rm",
    "guard-read-whole-file",
+   "guard-secret-value",
    "guard-unapproved-dispatch",
    "guard-ungated-commit",
    "guard-stop-contract",

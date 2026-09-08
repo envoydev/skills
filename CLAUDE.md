@@ -31,7 +31,7 @@ change made only inside a consuming project is throwaway (see Invariants).
   from: `checkout --` / `restore` / `reset --hard` / `clean -f`, blocked only when the tree is actually
   dirty, so a clean checkout passes; the guard had zero git coverage and a destructive `git checkout --`
   replayed exit 0 against every guard in the stack) +
-  `guard-read-whole-file.js` (PreToolUse `Read` + `Bash` - the same dump routed through the shell) + `guard-unapproved-dispatch.js` (PreToolUse
+  `guard-read-whole-file.js` (PreToolUse `Read` + `Bash` - the same dump routed through the shell) + `guard-secret-value.js` (PreToolUse `Read` + `Bash` - a credential is read for PRESENCE, never its value: blocks a Read or a dump verb on a JSON/dotenv file holding a `secret_key_pattern` key with a live value, judged by CONTENT since the path-based deny list leaves a project settings.json open and that is where the measured leak came from; an `echo $SECRET`, a bare `env`, and a credential-shaped literal in a command; its own `--presence <file> [KEY ...]` mode is the sanctioned read the guided commands call) + `guard-unapproved-dispatch.js` (PreToolUse
   `Task|Agent` - blocks an `*-implementer` dispatch without the `<docs-path>/flow/APPROVAL` gate
   file the flows write on explicit user approval or an explicit AUTO waiver, and blocks a generic `general-purpose`/`claude` dispatch while that stamp is live; stamps older than 8h or older than the session are absent; also blocks an `Explore`/generic dispatch whose brief asks a SYMBOL question - callers, declaration site, resolved type - since a grep-shaped seat answers those by name-match and the built-in `Explore` loads none of the project's rules) +
   `guard-ungated-commit.js` (PreToolUse `Bash` - the publish ceremony, both halves in one hook because
@@ -79,7 +79,7 @@ change made only inside a consuming project is throwaway (see Invariants).
   a block costs its denial text plus the retried turn, so the block RATE is the number that says a
   gate earns its keep, and the transcript alone records only which TOOL was denied, never which hook.
   Copied from the run's clone into a project's `.claude/hooks/` (wired with the placeholder quoted - `"$CLAUDE_PROJECT_DIR/.claude/hooks/<file>"` - so a project path with a space works; an update rewrites the older unquoted text in place); a hooks layer in the guided walk
-  makes them selectable per install (a selection with no `hook` lines installs all ten).
+  makes them selectable per install (a selection with no `hook` lines installs all eleven).
 - `stack/agents/` - the Claude-contract subagents, 43 total: the four build/test resolvers - .NET
     (`dotnet-build-error-resolver`, `dotnet-test-failure-resolver`) + Angular (`ng-build-error-resolver`,
     `angular-test-resolver`) - plus four cross-cutting agents (`ci-failure-diagnoser`, `runtime-failure-diagnoser`, `security-auditor` - a read-only
@@ -184,7 +184,7 @@ fallback), so an install is a single revision - the one `claude-stack.stamp` rec
 | Skills | installer snapshot-download + copy → `.claude/skills` (or plugin `/claude-stack`) |
 | MCP | `claude mcp add` → `<repo>/.mcp.json` |
 | Plugins | 7 via `claude plugin install` (superpowers, claude-md-management, the `*-lsp` pair, security-guidance, claude-hud, ponytail) |
-| Hooks | copied from the snapshot → `.claude/hooks/`, wired into `.claude/settings.json` (all ten; instrumentation env-gated off via CLAUDE_STACK_INSTRUMENT=0) |
+| Hooks | copied from the snapshot → `.claude/hooks/`, wired into `.claude/settings.json` (all eleven; instrumentation env-gated off via CLAUDE_STACK_INSTRUMENT=0) |
 | Agents | `.claude/agents/` - the 43 model/effort-pinned subagents described under Layout. Copied like hooks; per-tool `tools:` allowlist |
 | Install stamp | `claude-stack.stamp` (project `.claude/`, or the account dir when scope=global) - the source commit this install came from; `/claude-stack:configure` diffs it against `main`. Machine-local (covered by the `.claude/*` gitignore line) |
 | Convention gate | nine path-scoped convention rules in `.claude/rules/` (soft, glob auto-attach - each points a file type at its house-style skill; replaced the `require-convention-skill` hard gate) |

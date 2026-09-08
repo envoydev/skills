@@ -1145,6 +1145,7 @@
       "guard-fresh-session-start",
       "guard-protected-force-push",
       "guard-read-whole-file",
+      "guard-secret-value",
       "guard-stop-contract",
       "guard-unapproved-dispatch",
       "guard-ungated-commit",
