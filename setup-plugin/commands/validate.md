@@ -324,7 +324,9 @@ profile), output to `$TMP/select.out` - then:
   it (`<org>` or `<org>/<project>`) and pass `--sentry-slug`; `SENTRY_ACCESS_TOKEN` missing in token
   mode -> tell the user to add it there by hand (a personal/org API token, never through the chat,
   never a project-level settings.json - its env does not reach `.mcp.json`) or to choose
-  `--sentry-auth oauth`. Both present: one line, no question. The installer closes the selection and copies the added artifacts; already-installed
+  `--sentry-auth oauth`. Both present: one line, no question. Presence, never the value - run this
+  and paste its lines as-is: `node "$TMP/repo/stack/hooks/guard-secret-value.js" --presence "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/settings.json" SENTRY_SLUG SENTRY_ACCESS_TOKEN CONTEXT7_API_KEY`
+  (Windows: `node "$TMP\repo\stack\hooks\guard-secret-value.js" --presence "$env:USERPROFILE\.claude\settings.json" SENTRY_SLUG SENTRY_ACCESS_TOKEN CONTEXT7_API_KEY`; a `--space <name>` install reads `~/.claude-<name>/settings.json`). Output is `KEY=set (N chars)` or `KEY=absent` - nothing else is ever printed, and a dump of that file by any other route is blocked by the same hook. The installer closes the selection and copies the added artifacts; already-installed
   ones are simply re-laid, harmless. Show the prereq report first; never install past a blocker.
 - **Removes**: `install --selection` does NOT uninstall - delete each accepted removal explicitly,
   showing the command first: the skill directory / agent file / rule file; a hook loses BOTH its

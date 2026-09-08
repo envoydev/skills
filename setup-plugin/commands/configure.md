@@ -242,6 +242,10 @@ never pasted into the chat, never a project-level `.claude/settings.json` (its e
 line and ask nothing. An existing registration needs no auth flag: `update` reads it back and keeps
 its mode (an old plain-`Bearer` header migrates to the fixed `Sentry-Bearer` one).
 
+Presence, never the value - run this and paste its lines as-is:
+`node "$TMP/repo/stack/hooks/guard-secret-value.js" --presence "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/settings.json" SENTRY_SLUG SENTRY_ACCESS_TOKEN CONTEXT7_API_KEY`
+(Windows: `node "$TMP\repo\stack\hooks\guard-secret-value.js" --presence "$env:USERPROFILE\.claude\settings.json" SENTRY_SLUG SENTRY_ACCESS_TOKEN CONTEXT7_API_KEY`; a `--space <name>` install reads `~/.claude-<name>/settings.json`). Output is `KEY=set (N chars)` or `KEY=absent` - nothing else is ever printed, and a dump of that file by any other route is blocked by the same hook.
+
 ## 8. Plugins
 
 Locked = the plugins the kept selection pulls (an LSP plugin rides its stack's closure;
