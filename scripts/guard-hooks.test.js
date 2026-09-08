@@ -909,6 +909,49 @@ test('guard-cross-project-write: space account dirs, ~ in the allowance, and unr
   }).status, 0, 'a subdirectory cwd still sees the whole repo');
 });
 
+test("guard-cross-project-write: a block ends in an ask, and the user's allow is honoured through a session receipt", () => {
+  // The denial used to end at 'write a task card' - the model wrote the card or just stopped, and
+  // the user never got the choice. Now the denial mandates ONE AskUserQuestion and names the
+  // receipt an 'allow' answer writes; the guard reads that receipt the way the dispatch guard reads
+  // APPROVAL - this session's own, under 8h - and a root that contains the project is dropped.
+  const root = fs.mkdtempSync(path.join(TMP, 'projC-'));
+  const other = fs.mkdtempSync(path.join(TMP, 'projD-'));
+  const receipt = path.join(root, '.claude', 'docs', 'flow', 'CROSS-WRITE-ALLOW');
+  const tp = path.join(root, 'session.jsonl');
+  const go = (payload, env = {}) => spawnSync(process.execPath, [path.join(HOOKS, 'guard-cross-project-write.js')],
+    { input: JSON.stringify({ transcript_path: tp, ...payload }), encoding: 'utf8', env: { ...process.env, CLAUDE_PROJECT_DIR: root, CLAUDE_STACK_ALLOW_WRITE_OUTSIDE: '', CLAUDE_STACK_DOCS_PATH: '.claude/docs', ...env } });
+  const target = path.join(other, 'src', 'a.ts');
+  const denied = go({ tool_name: 'Write', tool_input: { file_path: target } });
+  assert.equal(denied.status, 2);
+  assert.match(denied.stderr, /ONE AskUserQuestion/, 'the denial mandates the ask');
+  assert.match(denied.stderr, /Task card in this project \(Recommended\)/, 'the card is the recommended option');
+  assert.ok(denied.stderr.includes(`Allow writes into ${fs.realpathSync(other)} for this session`), 'the allow option names the other ROOT, not the file');
+  assert.match(denied.stderr, /flow\/CROSS-WRITE-ALLOW/, 'the denial names the receipt');
+  assert.doesNotMatch(denied.stderr, /stale/, 'no receipt, no staleness talk');
+  // the receipt: one root per line, comments allowed, this session's own
+  fs.writeFileSync(tp, '{}\n'); pause(30);
+  fs.mkdirSync(path.dirname(receipt), { recursive: true });
+  fs.writeFileSync(receipt, `# allowed by the user in this session\n${other}\n`);
+  assert.equal(go({ tool_name: 'Write', tool_input: { file_path: target } }).status, 0, 'the receipt opens the named tree');
+  assert.equal(go({ tool_name: 'Bash', tool_input: { command: `echo x > ${target}` } }).status, 0, 'through the shell too');
+  assert.equal(go({ tool_name: 'Bash', tool_input: { command: `git -C ${other} commit -m x` } }).status, 0, 'and a git write there');
+  assert.equal(go({ tool_name: 'Write', tool_input: { file_path: path.join(TMP, 'projE-elsewhere', 'f.txt') } }).status, 2, 'only the named tree');
+  // a root that CONTAINS the project would swallow the whole gate
+  fs.writeFileSync(receipt, `${TMP}\n`);
+  assert.equal(go({ tool_name: 'Write', tool_input: { file_path: target } }).status, 2, 'a containing root is dropped');
+  // stale: older than 8h
+  fs.writeFileSync(receipt, `${other}\n`);
+  const old = (Date.now() - 9 * 3600 * 1000) / 1000; fs.utimesSync(receipt, old, old);
+  const aged = go({ tool_name: 'Write', tool_input: { file_path: target } });
+  assert.equal(aged.status, 2, 'a 9h-old receipt is absent');
+  assert.match(aged.stderr, /stale/, 'and the denial says so, so the model does not loop on rewriting it');
+  // stale: written before this session began
+  fs.writeFileSync(receipt, `${other}\n`); pause(50);
+  const tp2 = path.join(root, 'session2.jsonl');
+  fs.writeFileSync(tp2, '{}\n'); pause(20); fs.appendFileSync(tp2, '{}\n');
+  assert.equal(go({ tool_name: 'Write', tool_input: { file_path: target }, transcript_path: tp2 }).status, 2, "another session's receipt is not this one's consent");
+});
+
 test('every guard fails open on a JSON scalar or null payload', () => {
   // `null` parses, so the parse guard let it through and the first field read threw a TypeError -
   // exit 1 with a stack trace surfaced as a hook error (reproduced on 7 of 9 guards).

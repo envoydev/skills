@@ -13,7 +13,10 @@
 //
 // Reads pass. Writes inside the project root pass. Writes to the session's own scratch (the OS
 // temp dir), to the Claude account dirs (~/.claude and the ~/.claude-<space> siblings - settings,
-// memory, plugins), and to /dev pass. Everything else is blocked with the task-card instruction.
+// memory, plugins), and to /dev pass. Everything else is blocked - and the block ENDS IN AN ASK:
+// the denial mandates one AskUserQuestion (task card here - recommended; allow that tree for this
+// session; drop), because a bare denial left the user out of the decision (the model wrote the
+// card or just stopped). The 'allow' answer is honoured through a session receipt, below.
 // On Bash the write-shaped verbs are judged where they actually land: a `cd`/`pushd` earlier in
 // the same command moves the anchor for every relative path and every bare `git <mutating>` after
 // it (`cd ../other && git commit` is the same write as `git -C ../other commit` - reproduced
@@ -152,6 +155,34 @@ function inside(target, dir) {
 // repo would sit inside it too. On macOS os.tmpdir() is under /var/folders, so a project
 // worked on from a temp dir is exactly that case (it is how this hook's own tests run).
 const effectiveAllow = allowRoots.filter((d) => !inside(ROOT, d));
+// The user's own allowance for THIS session. A block ends in an ask, and the 'allow' answer has
+// to be honourable or the ask offers a route this guard then denies - the failure baseline-git
+// records: an ask recommended a sibling-repo commit, the user took it, the guard denied it at the
+// first git verb. So the answer is recorded as a receipt this guard reads:
+// <docs-path>/flow/CROSS-WRITE-ALLOW, one root per line, '#' comments allowed. Session-scoped
+// the way the dispatch guard's APPROVAL stamp is - older than 8h, or written before this session
+// began (the transcript's birthtime, where the filesystem reports a real one), reads as absent -
+// and a root that contains the project is dropped, the containment rule above.
+// CLAUDE_STACK_ALLOW_WRITE_OUTSIDE stays the permanent lever for a tree the project owns.
+const RECEIPT = path.resolve(ROOT, docsRootEnv(), 'flow', 'CROSS-WRITE-ALLOW');
+const MAX_RECEIPT_AGE_MS = 8 * 60 * 60 * 1000;
+let receiptStale = false;
+const receiptRoots = (() => {
+  try {
+    const st = fs.statSync(RECEIPT);
+    let sessionStartMs = 0;
+    try {
+      const t = fs.statSync(String(payload.transcript_path || ''));
+      sessionStartMs = t.birthtimeMs && t.birthtimeMs !== t.ctimeMs ? t.birthtimeMs : 0;
+    } catch { sessionStartMs = 0; }
+    if (Date.now() - st.mtimeMs > MAX_RECEIPT_AGE_MS || (sessionStartMs && st.mtimeMs < sessionStartMs)) {
+      receiptStale = true;
+      return [];
+    }
+    return fs.readFileSync(RECEIPT, 'utf8').split('\n').map((l) => l.trim()).filter((l) => l && !l.startsWith('#'))
+      .map(expandTilde).map(nativePath).map(real).filter((d) => !inside(ROOT, d));
+  } catch { return []; } // absent or unreadable - no allowance recorded
+})();
 // ~/.claude-<space> account dirs are siblings of ~/.claude, matched by prefix. The prefix is
 // dropped only when the project itself sits under such a dir (the containment rule above) -
 // checking whether the project sat under HOME instead disabled it for every real project, and a
@@ -162,6 +193,7 @@ function allowed(target) {
   const t = realish(target);
   if (inside(t, ROOT)) return true;
   if (effectiveAllow.some((d) => inside(t, d))) return true;
+  if (receiptRoots.some((d) => inside(t, d))) return true; // the user's 'allow' for this session
   if (spaceOk && t.startsWith(spacePrefix)) return true;
 
   return false;
@@ -200,21 +232,53 @@ function otherProjectName(target) {
 
   return parts[i] || path.basename(path.dirname(realish(target)));
 }
-function block(what, target) {
-  const other = otherProjectName(target);
+// The other project's ROOT - what an 'allow' answer opens: its repo root when one is findable,
+// else the first directory that diverges from this project (a file is never the unit).
+function otherProjectRoot(target) {
+  const t = realish(target);
+  let dir = path.dirname(t);
+  for (let i = 0; i < 64; i++) {
+    if (fs.existsSync(path.join(dir, '.git'))) return dir;
+    const parent = path.dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  const parts = t.split(path.sep);
+  const rootParts = ROOT.split(path.sep);
+  let i = 0;
+  while (i < parts.length && i < rootParts.length && parts[i] === rootParts[i]) i++;
+  if (parts[i] === '' || /^[A-Za-z]:$/.test(parts[i] || '')) i++;
+  return i < parts.length - 1 ? (parts.slice(0, i + 1).join(path.sep) || path.sep) : path.dirname(t);
+}
+// `shown` is the token the session wrote (or the resolved path after a cd); `abs` is where it lands.
+function block(what, shown, abs = shown) {
+  const other = otherProjectName(abs);
+  const otherRoot = otherProjectRoot(abs);
+  const docsRel = docsRoot.replace(/^\//, '');
+  const receiptRel = path.join(docsRel, 'flow', 'CROSS-WRITE-ALLOW');
   process.stderr.write(
-    `Blocked: ${what} targets '${target}', which is outside this session's project\n` +
+    `Blocked: ${what} targets '${shown}', which is outside this session's project\n` +
     `(${ROOT}). A session belongs to ONE project - a change another repo needs is HANDED OFF,\n` +
     `not applied here, because a change landing there skips that repo's tests, conventions,\n` +
     `review and release, and its own project never sees it.\n\n` +
-    `Write a task card instead, inside THIS project:\n` +
-    `  ${path.join(docsRoot.replace(/^\//, ''), 'cross-project-tasks', '<other-project>.md')}\n` +
-    `naming the target repo and, per task: what must change and where (file + symbol, from your\n` +
-    `investigation), why this project needs it, the contract both sides must agree on, and how\n` +
-    `the other side can verify it. Then finish YOUR side against the current behaviour of\n` +
-    `${other}, or say plainly what is blocked until that task lands.\n\n` +
+    `Do not stop here, and do not decide for the user: end this turn with ONE AskUserQuestion\n` +
+    `carrying these options, in this order -\n` +
+    `  'Task card in this project (Recommended)' - written at\n` +
+    `  ${path.join(docsRel, 'cross-project-tasks', '<other-project>.md')}\n` +
+    `  naming the target repo and, per task: what must change and where (file + symbol, from your\n` +
+    `  investigation), why this project needs it, the contract both sides must agree on, and how\n` +
+    `  the other side can verify it; then finish YOUR side against the current behaviour of\n` +
+    `  ${other}, or say plainly what is blocked until that task lands.\n` +
+    `  'Allow writes into ${otherRoot} for this session' - on this answer write the receipt\n` +
+    `  ${receiptRel} with that root on its own line, then retry the write. This guard honours\n` +
+    `  the receipt for this session only: under 8h, and never one written before the session began.\n` +
+    `  'Drop the change'.\n\n` +
+    (receiptStale
+      ? `A receipt at ${receiptRel} exists but is stale - older than 8h, or written before this\n` +
+        `session began - so it records another run's decision; rewrite it only on a fresh 'allow'.\n`
+      : '') +
     `Reading and investigating ${other} stays open - that is how the card gets specific.\n` +
-    `If this project genuinely owns that tree, add its root to CLAUDE_STACK_ALLOW_WRITE_OUTSIDE.`,
+    `A tree this project genuinely owns belongs in CLAUDE_STACK_ALLOW_WRITE_OUTSIDE instead - permanent, no ask.`,
   );
   process.exit(2);
 }
@@ -226,7 +290,7 @@ if (tool === 'Write' || tool === 'Edit' || tool === 'NotebookEdit') {
   const target = input.file_path || input.notebook_path;
   if (!target) process.exit(0);
   const abs = resolveTarget(String(target));
-  if (!allowed(abs)) block(`${tool} of a file`, String(target));
+  if (!allowed(abs)) block(`${tool} of a file`, String(target), abs);
   process.exit(0);
 }
 
@@ -340,7 +404,7 @@ function judge(rawIn, index, what) {
   // Nothing can be handed off to a repo that cannot be named, so this passes rather than blocks.
   if (/[*?\[]/.test(otherProjectName(abs))) return;
   // name the token the session wrote unless a cd moved it - then the resolved path says where it lands
-  if (!allowed(abs)) block(what, explicit ? raw : abs);
+  if (!allowed(abs)) block(what, explicit ? raw : abs, abs);
 }
 const judgeAll = (list, index, what) => {
   for (const tok of shellWords(list)) {

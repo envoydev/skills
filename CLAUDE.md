@@ -65,7 +65,7 @@ change made only inside a consuming project is throwaway (see Invariants).
   `/cygdrive/c/...`) is read as the Windows path it names before any resolution - node on win32
   resolves that spelling against the current drive, which blocked a session cleaning its own temp
   scratch (the read-whole-file and ungated-commit guards translate it too), an unexpanded variable is never
-  judged, and `CLAUDE_STACK_ALLOW_WRITE_OUTSIDE` opens a second tree a project genuinely owns) +
+  judged, a block ENDS IN AN ASK - the denial mandates one AskUserQuestion: task card here (recommended), allow that tree for this session, or drop - because a bare denial left the user out of the decision, and the 'allow' answer is honoured through the `<docs-path>/flow/CROSS-WRITE-ALLOW` receipt (one root per line; this session's own, under 8h, a root containing the project dropped), while `CLAUDE_STACK_ALLOW_WRITE_OUTSIDE` opens a second tree a project genuinely owns, permanently) +
   `guard-answer-length.js` (dual-wired: a `UserPromptSubmit` hook that appends the answer budget -
   3 sentences plus points, ~900 chars of prose, code/tables exempt - to every turn's context, and a
   `Stop` hook that blocks an answer past the 1800-char prose cap when the user's own message asked
