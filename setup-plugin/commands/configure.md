@@ -242,6 +242,10 @@ never pasted into the chat, never a project-level `.claude/settings.json` (its e
 line and ask nothing. An existing registration needs no auth flag: `update` reads it back and keeps
 its mode (an old plain-`Bearer` header migrates to the fixed `Sentry-Bearer` one).
 
+Presence, never the value - run this and paste its lines as-is:
+`node "$TMP/repo/stack/hooks/guard-secret-value.js" --presence "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/settings.json" SENTRY_SLUG SENTRY_ACCESS_TOKEN CONTEXT7_API_KEY`
+(the same line runs on Windows - Claude Code's Bash tool is Git Bash, where `$env:USERPROFILE` is not a variable; a `--space <name>` install reads `~/.claude-<name>/settings.json`). Output is `KEY=set (N chars)` or `KEY=absent` - nothing else is ever printed, and a dump of that file by any other route is blocked by the same hook.
+
 ## 8. Plugins
 
 Locked = the plugins the kept selection pulls (an LSP plugin rides its stack's closure;
@@ -365,17 +369,19 @@ CLAUDE.md decision and reconcile result, anything deferred, and remind that a re
 MCP registration changes. The run rewrites `claude-stack.stamp` to the revision it installed, so
 the next configure diffs from here.
 
-**A next step that needs a USER ACTION in this session ends the turn in ONE AskUserQuestion.**
-A listed next step is a directive, and three of them shipped as prose in one session and all
-three were ignored. So: after the report, if any listed step is something the user must decide
-or run now - re-index serena, run a manual-only capture skill, restart for an MCP change, rotate
-a credential - put those steps through AskUserQuestion as the turn's last act, one option per
-step plus 'nothing now'. Steps that are purely informational stay in the report and end nothing.
-Recommendation FIRST, in the question text itself - the step and the one reason it matters
-('Re-run `/project-agent-capabilities`? The selection changed, so the generated
-rule still names what this project dropped'), never a contentless 'What now?' over a list. The report
-already did the deciding; the ask only collects consent, so the recommended option comes first
-and says it is recommended. The house form of this rule is the interaction baseline's.
+**The run closes on a suggestion card, never on a question.** After the report, list the
+follow-ups that are the USER's to run - restart for an MCP change, `/project-agent-capabilities`
+(when installed), a manual-only capture, the serena re-index, a credential to rotate or set by
+hand - as `Suggested next steps`, the recommended one first and each with the one reason it
+matters ('`/project-agent-capabilities` - the selection changed, so the generated rule still
+names what this project dropped'). No AskUserQuestion over them: the walk's asks end with the
+installer (a write still gets its consent ask where it happens - step 12's CLAUDE.md reconcile),
+and the closing ask over follow-ups was dropped as friction - the user's call, made knowing a
+prose next step was ignored 3 of 3 in one audited session, which is why the reason rides beside
+every step. Close with this line, verbatim:
+'Nothing is pending on this run - these are yours to run when you choose.' The stop-contract
+guard reads that sentence as a finished close; without it a 'done + next step' card is blocked
+as a stall and the guard demands the very ask this paragraph removes.
 
 
 ## Clean up the temp dir - ALWAYS

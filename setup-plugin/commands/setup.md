@@ -161,6 +161,10 @@ Run the installer **from the snapshot**, and pass it back with `--source` so it 
 
 The sentry values are ACCOUNT-level, not project-level: `--sentry-slug` writes `SENTRY_SLUG` into the account `settings.json` env itself, and the token is never written by this command - after the run, re-read that file and, when `SENTRY_ACCESS_TOKEN` (token mode) or `SENTRY_SLUG` is still absent, say so in the next-steps card with the file path and the snippet from step 7.
 
+Presence, never the value - run this and paste its lines as-is:
+`node "$TMP/repo/stack/hooks/guard-secret-value.js" --presence "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/settings.json" SENTRY_SLUG SENTRY_ACCESS_TOKEN CONTEXT7_API_KEY`
+(the same line runs on Windows - Claude Code's Bash tool is Git Bash, where `$env:USERPROFILE` is not a variable; a `--space <name>` install reads `~/.claude-<name>/settings.json`). Output is `KEY=set (N chars)` or `KEY=absent` - nothing else is ever printed, and a dump of that file by any other route is blocked by the same hook.
+
 Then apply the step-1 environment choices where they differ from what the installer left: a merge on the scope's settings.json touching ONLY the chosen keys - every key screen B asked about (the catalog's rows, `env.` prefixed) (plus `autoCompactEnabled: false` when the user chose 'off'; delete the pct override in that case rather than writing a dead value) - everything else in the file preserved. The installer seeds these only when absent, so the values written here are the user's and survive every later update untouched. Accepted defaults on a fresh install need no write - the installer's seed already matches.
 
 When the applied `CLAUDE_STACK_DOCS_PATH` differs from what the installer stamped (the installer ran before this merge), re-stamp the deployed rule - run `node $TMP/repo/scripts/stamp-docs-root.js <project root>` (a global install: `--claude-dir <account dir>` instead - the dir holding `rules/` + `settings.json`): it rewrites the 'This install's root:' line in `.claude/rules/baseline-docs-root.md` from settings.json, so the always-on awareness matches the env; every later update re-stamps it too.
@@ -178,17 +182,18 @@ Not required - open with WHERE it lives and WHAT a yes changes, then AskUserQues
 
 ## Post-check + next steps - close every run with this card
 
-**A next step that needs a USER ACTION in this session ends the turn in ONE AskUserQuestion.**
-A listed next step is a directive, and three of them shipped as prose in one session and all three
-were ignored. So after the card, put the steps the user must decide or run NOW - the session
-reload, the gitignore write, the account-file credential line, a manual-only capture skill -
-through AskUserQuestion as the turn's last act, one option per step plus 'nothing now'. Purely
-informational steps stay in the card and end nothing.
-Recommendation FIRST, in the question text itself - the step and the one reason it matters
-('Reload the session now? Nothing installed this run is live until the MCPs
-connect and the rules inject at launch'), never a contentless 'What now?' over a list. The report
-already did the deciding; the ask only collects consent, so the recommended option comes first
-and says it is recommended. The house form of this rule is the interaction baseline's.
+**The run closes on a suggestion card, never on a question.** The steps below that are the
+USER's to run - the session reload, the account-file credential line, the capture sequence,
+the serena index - are listed as suggestions, the one everything depends on first and each with
+the one reason it matters ('Reload the session - nothing installed this run is live until the
+MCPs connect and the rules inject at launch'). No AskUserQuestion over them: the walk's asks end
+with the installer, and the closing ask over follow-ups was dropped as friction - the user's
+call, made knowing a prose next step was ignored 3 of 3 in one audited session, which is why the
+reason rides beside every step. The gitignore write in item 1 keeps its own consent ask - it is
+a write, not a suggestion. Close the card with this line, verbatim: 'Nothing is pending on this
+run - these are yours to run when you choose.' The stop-contract guard reads that sentence as a
+finished close; without it a 'done + next step' card is blocked as a stall and the guard demands
+the very ask this paragraph removes.
 
 Report what still needs a hand: LSP tools (`csharp-ls` via `dotnet tool install -g csharp-ls` on a .NET setup), the `/claude-hud:setup` statusline step, and that the first `claude plugin install` may prompt to trust. Then, AFTER the summary, print the next-steps card - built from what THIS run actually installed, never naming a command whose skill is absent. The card opens with the one step everything else depends on - reload the session (MCPs connect and skills/agents/rules inject at launch; nothing installed this run is live until then) - and closes by naming `${CLAUDE_PLUGIN_ROOT}/references/post-install.md` as the durable copy the user can re-read later (it adds the serena setup prompt and the gitignore semantics):
 

@@ -563,6 +563,8 @@ HOOKS=(
   "guard-catastrophic-rm.js::Bash::"              # block recursive rm of /, ~, $HOME, the cwd or its parent (. / ..), a bare *, or several top-level dirs at once
   "guard-read-whole-file.js::Read::"              # block whole-file Read of a >200-line source file - locate via serena first; caps cumulative half-split reconstruction
   "guard-read-whole-file.js::Bash::"              # same gate on Bash: a bare `cat file.ts` of a large source file is the Read block routed through the shell
+  "guard-secret-value.js::Read::"                 # block a Read of a file that HOLDS a credential (content-judged: a JSON/dotenv key matching environment.json's secret_key_pattern with a live value) - presence only via `node guard-secret-value.js --presence <file> [KEY ...]`
+  "guard-secret-value.js::Bash::"                 # same gate on Bash: cat/jq/grep/an inline node read of such a file, `echo $SECRET`, a bare `env`, or a credential-shaped literal in the command - a prose rule that failed live (a JSON.stringify(s.env) printed a token)
   "guard-unapproved-dispatch.js::Task|Agent::"    # block *-implementer dispatch without the docs-root flow/APPROVAL gate file (APPROVED/AUTO)
   "guard-ungated-commit.js::Bash::"               # block a non-trivial git commit without the docs-root flow/COMMIT-GATE receipt (VERIFIED/WAIVED), and a git push / gh pr merge without flow/PUSH-GATE (CLAUDE_STACK_PUSH_GATE=0 turns that half off)
   "guard-stop-contract.js::@Stop::"               # Stop event: block a turn ending on a decision-shaped question in prose - re-emit as AskUserQuestion (measured stalls 13min-37h); also carries the fresh-session offer, once per 1.5x of context growth past 40% of the window

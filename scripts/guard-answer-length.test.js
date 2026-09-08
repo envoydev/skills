@@ -11,6 +11,10 @@ const { spawnSync } = require('node:child_process');
 
 const HOOK = path.join(__dirname, '..', 'stack', 'hooks', 'guard-answer-length.js');
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'answer-length-'));
+// The hook appends a block row to `<root>/<docs-path>/hook-blocks/`, and the root falls back to the
+// process cwd when CLAUDE_PROJECT_DIR is unset - so a suite run from this checkout wrote its
+// fixtures into the repo's own field ledger. Pin a scratch root for the whole run.
+process.env.CLAUDE_PROJECT_DIR = fs.mkdtempSync(path.join(TMP, 'root-'));
 
 // A transcript is JSONL: one user turn, then the assistant answer under test.
 function transcript(name, userText, assistantBlocks) {

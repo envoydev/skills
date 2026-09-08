@@ -37,6 +37,7 @@ const ROUTES = [
   { hook: 'guard-protected-force-push.js', event: 'PreToolUse', tools: ['Bash'], deny: true },
   { hook: 'guard-catastrophic-rm.js', event: 'PreToolUse', tools: ['Bash'], deny: true },
   { hook: 'guard-read-whole-file.js', event: 'PreToolUse', tools: ['Read', 'Bash'], deny: true },
+  { hook: 'guard-secret-value.js', event: 'PreToolUse', tools: ['Read', 'Bash'], deny: true },
   { hook: 'guard-unapproved-dispatch.js', event: 'PreToolUse', tools: ['Task', 'Agent'], deny: true },
   { hook: 'guard-ungated-commit.js', event: 'PreToolUse', tools: ['Bash'], deny: true },
   { hook: 'guard-stop-contract.js', event: 'PreToolUse', tools: ['AskUserQuestion'], deny: false, needsTranscript: true },

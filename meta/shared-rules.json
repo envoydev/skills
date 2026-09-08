@@ -3056,6 +3056,27 @@
         }
       ]
     },
+    "cross-write-allow-receipt": {
+      "_note": "The cross-project write guard's block ends in ONE AskUserQuestion (task card - recommended / allow that tree for this session / drop), and the 'allow' answer is honoured through a receipt at <docs-path>/flow/CROSS-WRITE-ALLOW - one root per line, this session's own, under 8h, a root containing the project dropped. The hook owns the path (it resolves and reads the file); the two always-on rules that describe the ask name the same path. A rename in one place leaves the model writing a receipt the guard never reads.",
+      "owner": {
+        "file": "stack/hooks/guard-cross-project-write.js",
+        "marker": "'flow', 'CROSS-WRITE-ALLOW'"
+      },
+      "sites": [
+        {
+          "file": "stack/rules/baseline-git.md",
+          "marker": "`<docs-path>/flow/CROSS-WRITE-ALLOW` receipt"
+        },
+        {
+          "file": "stack/rules/baseline-docs-root.md",
+          "marker": "`<docs-path>/flow/CROSS-WRITE-ALLOW` receipt"
+        },
+        {
+          "file": "CLAUDE.md",
+          "marker": "`<docs-path>/flow/CROSS-WRITE-ALLOW` receipt"
+        }
+      ]
+    },
     "cross-project-task-card-home": {
       "_note": "A change another repo needs is handed off as a task card at <docs-path>/cross-project-tasks/<other-project>.md, never written into that repo (guard-cross-project-write blocks the write). The hook is canonical - it prints the path in its block text; the docs-root rule lists the home, baseline-git binds the receipt rule to it, and the three flows that hand off write the card.",
       "owner": {
@@ -3242,28 +3263,28 @@
         }
       ]
     },
-    "next-step-ask-recommendation-first": {
-      "_note": "An AskUserQuestion's question TEXT carries the recommendation - the action plus the one reason it matters - never a contentless opener ('What now?') over a list of options, which hands back the deciding the report just did. Canonical in the always-on interaction baseline (every session and subagent, refreshed by `update`); the four guided commands restate it at their closing next-steps ask, where the failure was measured, each with its OWN example.",
+    "suggestion-close-nothing-pending": {
+      "_note": "The four guided commands close on a suggestion card, not an ask, and end it with ONE verbatim line that the stop-contract guard's NOTHING_PENDING_RE reads as a finished close - without it a 'done + next step' card is the measured stall shape and the guard demands the ask the commands removed. The hook owns the sentence (its regex is the contract); the commands carry the copy the model prints. Change the wording in all five or the guard starts blocking every walk's close. The ask-carries-the-recommendation rule this replaced stays canonical in the interaction baseline; the commands no longer ask at the close, so they no longer restate it.",
       "owner": {
-        "file": "stack/rules/baseline-interaction.md",
-        "marker": "never a contentless opener"
+        "file": "stack/hooks/guard-stop-contract.js",
+        "marker": "Nothing is pending on this run - these are yours to run when you choose."
       },
       "sites": [
         {
           "file": "setup-plugin/commands/setup.md",
-          "marker": "never a contentless 'What now?' over a list"
+          "marker": "Nothing is pending on this run - these are yours to run when you choose."
         },
         {
           "file": "setup-plugin/commands/configure.md",
-          "marker": "never a contentless 'What now?' over a list"
+          "marker": "Nothing is pending on this run - these are yours to run when you choose."
         },
         {
           "file": "setup-plugin/commands/update.md",
-          "marker": "never a contentless 'What now?' over a list"
+          "marker": "Nothing is pending on this run - these are yours to run when you choose."
         },
         {
           "file": "setup-plugin/commands/validate.md",
-          "marker": "never a contentless 'What now?' over a list"
+          "marker": "Nothing is pending on this run - these are yours to run when you choose."
         }
       ]
     }

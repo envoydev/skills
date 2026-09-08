@@ -15,7 +15,8 @@ description: House baseline - the generated-docs root. Always-on (no paths), ins
 - Creating a doc OUTSIDE this root - a committed `docs/`, the repo root - happens only on the
   user's asked-first approval of that exact location (AskUserQuestion, per the interaction
   baseline); never silently, however conventional the spot looks. A sibling repo is never
-  written from this session, approval or not (the cross-project write guard blocks it): a doc
+  written from this session unless the user allows it in the cross-project write guard's own
+  ask - its `<docs-path>/flow/CROSS-WRITE-ALLOW` receipt, this session only; by default a doc
   about it lives in `related-context/`, a change it must make is a task card in
   `cross-project-tasks/`. Editing an EXISTING first-class repo doc where it already lives (the top-level
   `README.md`, an established ADR home) is not a generated doc and needs no ask.

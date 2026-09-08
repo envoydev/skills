@@ -199,6 +199,15 @@ const PROSE_ASK_RE = /\b(say the word|say go|just say so|want me to [^.?!\n]{0,8
 // hit: something finished, and something still pending on the user or on a running job.
 const DONE_RE = /\b(done|complete[d]?|finished|committed|landed|green|all tests pass|ready)\b/i;
 const PENDING_RE = /\b(not pushed|nothing pushed|awaiting|waiting (on|for)|still running|pending your|next step|remains?|left to do|yet to|whenever you|when you'?re ready|un-?pushed)\b/i;
+// The one close that names a next step WITHOUT stalling: the run says so. The guided plugin walks
+// (setup / configure / update / validate) end on a suggestion card - reload the session, re-run the
+// capabilities capture - and close it with one verbatim line (pinned in shared-rules.json):
+// 'Nothing is pending on this run - these are yours to run when you choose.'
+// That sentence is the ambiguity the doneClose branch exists to
+// catch, resolved in the text itself: nothing waits on the model, so nothing is asked. Narrow on
+// purpose - the disclaimer must name the RUN or the model as the side with nothing pending; a
+// bare 'nothing pending' already passed, and 'pending your review' still stalls.
+const NOTHING_PENDING_RE = /\bnothing(?: (?:else|more))?(?: is)? pending (?:on|from) (?:me|my side|my end|this run|the run|this turn)\b/i;
 
 // --- read the transcript tail (last ~512KB) and pull the last assistant message ---
 function lastAssistantMessage() {
@@ -349,7 +358,9 @@ if (payload.hook_event_name === 'Stop') {
     // goes green') was blocked, and the denial's own prescribed escape then tripped PROSE_ASK_RE:
     // one status close, two blocks, from two branches of this hook (measured, 87k re-sent).
     && !/\b(ci|pipeline|workflow|build|suite|tests?|job|deploy(ment)?)\b[^.\n]{0,40}\b((still )?(running|in progress|queued|pending)|in the background|backgrounded)\b/i.test(tail)
-    && !/\b(in the background|backgrounded|i'?ll report back|watching (it|the run|for))\b/i.test(tail);
+    && !/\b(in the background|backgrounded|i'?ll report back|watching (it|the run|for))\b/i.test(tail)
+    // ...and a close that says the run itself has nothing pending is finished, not stalled.
+    && !NOTHING_PENDING_RE.test(tail);
   // A live credential that has entered this session outranks every other close: it cannot be
   // undone by a later turn, and the transcript keeps the value whatever happens next. This branch
   // runs FIRST and fires on a clean close too - three measured exposures ended exactly there.

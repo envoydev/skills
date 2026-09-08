@@ -91,7 +91,11 @@ cap exists for. A commit in a second tree this session may write (the cross-proj
 allowance, for a tree the project owns) gets its own receipt in THAT tree's docs root, written and
 cleared the same way; a sibling repo is never committed, branched, pushed or PR'd from
 here - its change is a task card under `<docs-path>/cross-project-tasks/`, and it is never OFFERED
-as an option in an ask either. Measured: an ask presented a sibling-repo commit + push + PR as its
+as an option in an ask of the run's own making. The one place it IS offered is the guard's own
+denial - 'Allow writes into <root> for this session', never the recommended option - and only
+because that answer is honoured: it writes the `<docs-path>/flow/CROSS-WRITE-ALLOW` receipt (one
+root per line; this session's own, under 8h) that the guard reads before it judges. Measured
+before the receipt existed: an ask presented a sibling-repo commit + push + PR as its
 `(Recommended)` option, the user took it, and `guard-cross-project-write.js` denied it at the first
 git verb - the run recommended a route the stack bans.
 

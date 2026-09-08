@@ -31,6 +31,16 @@ function transcript(name, rows) {
 // exercise the layers point it at a fixture of their own.
 process.env.CLAUDE_CONFIG_DIR = fs.mkdtempSync(path.join(TMP, 'acct-'));
 delete process.env.CLAUDE_STACK_CONTEXT_WINDOW;
+// Every guard appends a block row to `<root>/<docs-path>/hook-blocks/`, where the root falls back
+// to the process cwd when CLAUDE_PROJECT_DIR is unset - so a suite run from this checkout forged
+// 4MB of field ledger into the repo's own `.claude/docs/hook-blocks/` (measured 2026-09-07: 12,480
+// rows in nosession.jsonl alone). Pin a scratch root for the whole run; the cases that exercise the
+// ledger, or a gate that reads a receipt under the root, point it at a fixture of their own.
+process.env.CLAUDE_PROJECT_DIR = fs.mkdtempSync(path.join(TMP, 'root-'));
+// Three cases below deliberately anchor on THIS repo (a real project does not live in the temp
+// tree - that is what proves the containment rule, and the cwd fallback), so the root pin cannot
+// help them. They redirect the LEDGER instead: an absolute docs root none of those guards reads.
+const LEDGER = path.join(TMP, 'ledger');
 
 const assistantRow = (id, text, usage) => ({ type: 'assistant', message: { id, content: [{ type: 'text', text }], usage: usage || { cache_read_input_tokens: 10 } } });
 
@@ -99,6 +109,20 @@ test('guard-stop-contract: status about a running job is not a pending decision'
   assert.equal(run('guard-stop-contract.js', { hook_event_name: 'Stop', transcript_path: ci }), 0);
   const plain = transcript('plain', [assistantRow('m4', 'Here is the summary of what changed: three files, all tests green.')]);
   assert.equal(run('guard-stop-contract.js', { hook_event_name: 'Stop', transcript_path: plain }), 0);
+});
+
+test('guard-stop-contract: a suggestion close that says nothing is pending on the run is finished, not a stall', () => {
+  // The guided commands end on a next-steps card, not an ask: 'complete' + 'the next step' is the
+  // measured stall shape (PENDING_RE reads the singular; a model writing the card freely lands on
+  // it), and the one line that resolves it is the disclaimer - without it the same card stays blocked.
+  const card = 'Install complete - 9 skills, 4 agents, 11 hooks.\n\nSuggested next steps:\n'
+    + '1. Reload the session - the next step everything else depends on; nothing installed this run is live until the MCPs connect.\n'
+    + '2. `/project-agent-capabilities` - so the generated rule reflects the final inventory.\n\n'
+    + 'Nothing is pending on this run - these are yours to run when you choose.';
+  const sug = transcript('sug', [assistantRow('m6', card)]);
+  assert.equal(run('guard-stop-contract.js', { hook_event_name: 'Stop', transcript_path: sug }), 0, 'the disclaimer line makes the close a finished one');
+  const bare = transcript('bare', [assistantRow('m7', card.replace(/\n\nNothing is pending[^\n]*$/, ''))]);
+  assert.equal(run('guard-stop-contract.js', { hook_event_name: 'Stop', transcript_path: bare }), 2, 'the same card without the line is the measured stall');
 });
 
 test('guard-stop-contract: one turn split across rows sharing a message.id is judged whole', () => {
@@ -194,7 +218,7 @@ test('guard-read-whole-file: the Read matcher gates whole-file shapes and the cu
 });
 
 test('guard-read-whole-file: runtime dumps, file redirects, multi-file cats and unresolvable paths on Bash', () => {
-  const noRoot = { ...process.env, CLAUDE_PROJECT_DIR: '' };
+  const noRoot = { ...process.env, CLAUDE_PROJECT_DIR: '', CLAUDE_STACK_DOCS_PATH: LEDGER };
   assert.equal(bash('guard-read-whole-file.js', `node -e "console.log(require('fs').readFileSync('${BIG}','utf8'))"`), 2, 'node readFileSync dump');
   assert.equal(bash('guard-read-whole-file.js', `ruby -e "puts File.read('${BIG}')"`), 2, 'ruby File.read dump');
   assert.equal(bash('guard-read-whole-file.js', `cat ${BIG} > ${path.join(TMP, 'copy.js')}`), 0, 'a redirect into a file is a copy, not a dump');
@@ -714,7 +738,7 @@ test('guard-cross-project-write: the session\'s own scratch and the account dir 
   // root - the fixtures above deliberately do, which is what proves the containment rule.
   const repoRoot = path.join(__dirname, '..');
   const inRepo = (payload) => spawnSync(process.execPath, [path.join(HOOKS, 'guard-cross-project-write.js')],
-    { input: JSON.stringify(payload), encoding: 'utf8', env: { ...process.env, CLAUDE_PROJECT_DIR: repoRoot, CLAUDE_STACK_ALLOW_WRITE_OUTSIDE: '' } }).status;
+    { input: JSON.stringify(payload), encoding: 'utf8', env: { ...process.env, CLAUDE_PROJECT_DIR: repoRoot, CLAUDE_STACK_ALLOW_WRITE_OUTSIDE: '', CLAUDE_STACK_DOCS_PATH: LEDGER } }).status;
   const w = (f) => inRepo({ tool_name: 'Write', tool_input: { file_path: f } });
 
   assert.equal(w(path.join(os.tmpdir(), 'scratch', 'notes.md')), 0, 'the harness scratchpad');
@@ -866,7 +890,7 @@ test('guard-cross-project-write: space account dirs, ~ in the allowance, and unr
   const home = os.homedir();
   const repoRoot = path.join(__dirname, '..');
   const inRepo = (payload, env = {}) => spawnSync(process.execPath, [path.join(HOOKS, 'guard-cross-project-write.js')],
-    { input: JSON.stringify(payload), encoding: 'utf8', env: { ...process.env, CLAUDE_PROJECT_DIR: repoRoot, CLAUDE_STACK_ALLOW_WRITE_OUTSIDE: '', ...env } }).status;
+    { input: JSON.stringify(payload), encoding: 'utf8', env: { ...process.env, CLAUDE_PROJECT_DIR: repoRoot, CLAUDE_STACK_ALLOW_WRITE_OUTSIDE: '', CLAUDE_STACK_DOCS_PATH: LEDGER, ...env } }).status;
   if (home) {
     // A --space install keeps its memory under ~/.claude-<space>; the old check disabled that
     // allowance for every project living under HOME, i.e. every real project (reproduced).
@@ -883,6 +907,49 @@ test('guard-cross-project-write: space account dirs, ~ in the allowance, and unr
     input: JSON.stringify({ tool_name: 'Write', tool_input: { file_path: path.join(repoRoot, 'stack', 'x.md') }, cwd: path.join(repoRoot, 'scripts') }),
     encoding: 'utf8', env: { ...process.env, CLAUDE_PROJECT_DIR: '', CLAUDE_STACK_ALLOW_WRITE_OUTSIDE: '' },
   }).status, 0, 'a subdirectory cwd still sees the whole repo');
+});
+
+test("guard-cross-project-write: a block ends in an ask, and the user's allow is honoured through a session receipt", () => {
+  // The denial used to end at 'write a task card' - the model wrote the card or just stopped, and
+  // the user never got the choice. Now the denial mandates ONE AskUserQuestion and names the
+  // receipt an 'allow' answer writes; the guard reads that receipt the way the dispatch guard reads
+  // APPROVAL - this session's own, under 8h - and a root that contains the project is dropped.
+  const root = fs.mkdtempSync(path.join(TMP, 'projC-'));
+  const other = fs.mkdtempSync(path.join(TMP, 'projD-'));
+  const receipt = path.join(root, '.claude', 'docs', 'flow', 'CROSS-WRITE-ALLOW');
+  const tp = path.join(root, 'session.jsonl');
+  const go = (payload, env = {}) => spawnSync(process.execPath, [path.join(HOOKS, 'guard-cross-project-write.js')],
+    { input: JSON.stringify({ transcript_path: tp, ...payload }), encoding: 'utf8', env: { ...process.env, CLAUDE_PROJECT_DIR: root, CLAUDE_STACK_ALLOW_WRITE_OUTSIDE: '', CLAUDE_STACK_DOCS_PATH: '.claude/docs', ...env } });
+  const target = path.join(other, 'src', 'a.ts');
+  const denied = go({ tool_name: 'Write', tool_input: { file_path: target } });
+  assert.equal(denied.status, 2);
+  assert.match(denied.stderr, /ONE AskUserQuestion/, 'the denial mandates the ask');
+  assert.match(denied.stderr, /Task card in this project \(Recommended\)/, 'the card is the recommended option');
+  assert.ok(denied.stderr.includes(`Allow writes into ${fs.realpathSync(other)} for this session`), 'the allow option names the other ROOT, not the file');
+  assert.match(denied.stderr, /flow[\\/]CROSS-WRITE-ALLOW/, 'the denial names the receipt (path.join spells the separator per OS - measured: windows-latest printed a backslash)');
+  assert.doesNotMatch(denied.stderr, /stale/, 'no receipt, no staleness talk');
+  // the receipt: one root per line, comments allowed, this session's own
+  fs.writeFileSync(tp, '{}\n'); pause(30);
+  fs.mkdirSync(path.dirname(receipt), { recursive: true });
+  fs.writeFileSync(receipt, `# allowed by the user in this session\n${other}\n`);
+  assert.equal(go({ tool_name: 'Write', tool_input: { file_path: target } }).status, 0, 'the receipt opens the named tree');
+  assert.equal(go({ tool_name: 'Bash', tool_input: { command: `echo x > ${target}` } }).status, 0, 'through the shell too');
+  assert.equal(go({ tool_name: 'Bash', tool_input: { command: `git -C ${other} commit -m x` } }).status, 0, 'and a git write there');
+  assert.equal(go({ tool_name: 'Write', tool_input: { file_path: path.join(TMP, 'projE-elsewhere', 'f.txt') } }).status, 2, 'only the named tree');
+  // a root that CONTAINS the project would swallow the whole gate
+  fs.writeFileSync(receipt, `${TMP}\n`);
+  assert.equal(go({ tool_name: 'Write', tool_input: { file_path: target } }).status, 2, 'a containing root is dropped');
+  // stale: older than 8h
+  fs.writeFileSync(receipt, `${other}\n`);
+  const old = (Date.now() - 9 * 3600 * 1000) / 1000; fs.utimesSync(receipt, old, old);
+  const aged = go({ tool_name: 'Write', tool_input: { file_path: target } });
+  assert.equal(aged.status, 2, 'a 9h-old receipt is absent');
+  assert.match(aged.stderr, /stale/, 'and the denial says so, so the model does not loop on rewriting it');
+  // stale: written before this session began
+  fs.writeFileSync(receipt, `${other}\n`); pause(50);
+  const tp2 = path.join(root, 'session2.jsonl');
+  fs.writeFileSync(tp2, '{}\n'); pause(20); fs.appendFileSync(tp2, '{}\n');
+  assert.equal(go({ tool_name: 'Write', tool_input: { file_path: target }, transcript_path: tp2 }).status, 2, "another session's receipt is not this one's consent");
 });
 
 test('every guard fails open on a JSON scalar or null payload', () => {
