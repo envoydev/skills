@@ -207,6 +207,15 @@ const splitPipes = (seg) => splitOutsideQuotes(seg, (t, i) => (t[i] === '|' ? 1 
 // ---- Bash matcher ----
 if (payload.tool_name === 'Bash') {
   const raw = String(input.command || '');
+  // A credential-shaped literal typed into a command is already in the transcript as the call's own
+  // input; blocking still keeps it out of a file, a header and a remote, and names the rule. Judged
+  // on the RAW text: a heredoc that writes the value into a file is the same leak. The denial names
+  // the shape only - the value is never repeated.
+  if (SECRET_SHAPE.test(raw)) {
+    block('Blocked: the command carries a credential-shaped literal (a token / key / JWT).\n' +
+      'Per baseline-security.md a secret never passes through a tool call or the chat: the user puts it\n' +
+      'in the file by hand, or runs a copy-ready command in their own terminal (getpass, not an argument).\n');
+  }
   const command = stripHeredocsOf(raw);
   for (const seg of splitSegments(command)) {
     if (/\s>>?\s*[^&\s>]/.test(seg)) continue; // output into a file never reaches the context

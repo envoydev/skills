@@ -149,3 +149,13 @@ test('guard-secret-value: print verbs are judged per pipeline stage, and a prefi
   assert.equal(bash('sudo env | cut -d= -f1'), 0, 'names only, prefixed');
   assert.equal(bash('env -i sh -c true'), 0, 'env running a command');
 });
+
+// A fake JWT: three base64url segments. Built by concatenation so no scanner reads a real shape off this file.
+const FAKE_JWT = ['eyJ' + 'hbGciOiJIUzI1NiJ9', 'eyJ' + 'zdWIiOiIxMjM0NTY3ODkwIn0', 'abcdefghijklmnopqrstuvwxyz0123'].join('.');
+
+test('guard-secret-value: a credential-shaped literal in the command is blocked, heredoc bodies included', () => {
+  assert.equal(bash(`curl -H "Authorization: Bearer ${FAKE_JWT}" https://example.test/api`), 2, 'a token in a header');
+  assert.equal(bash(`cat <<'EOF' > ${path.join(TMP, 'out.json')}\n{ "env": { "SENTRY_ACCESS_TOKEN": "${FAKE_JWT}" } }\nEOF`), 2, 'writing the value into a file through a heredoc is the same leak');
+  assert.equal(bash('curl -H "Authorization: Bearer $API_TOKEN" https://example.test/api'), 0, 'a variable reference in a non-print verb is not a literal (and not printed)');
+  assert.equal(bash('echo "the token format is eyJ...header.payload.signature"'), 0, 'prose about the shape is not the shape');
+});
