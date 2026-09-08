@@ -207,6 +207,27 @@ if (payload.tool_name === 'Bash') {
     // The sanctioned read is exempt by name - it is this file.
     if (/guard-secret-value\.js["']?\s+--presence\b/.test(seg)) continue;
 
+    // Printing a credential-shaped VARIABLE: echo / printf with $NAME or ${NAME...}, printenv NAME.
+    // `${#NAME}` is a length - the presence idiom - and `[ -n "$NAME" ]` is a test, so only the
+    // arguments of a PRINT verb are judged.
+    const pr = seg.match(/(?:^|[\s(])(echo|printf|printenv)\b([^\n]*)/);
+    if (pr) {
+      const names = [...pr[2].matchAll(/\$\{?(?!#)([A-Za-z_][A-Za-z0-9_]*)/g)].map((m) => m[1]);
+      if (pr[1] === 'printenv') names.push(...pr[2].trim().split(/\s+/).filter((w) => /^[A-Za-z_][A-Za-z0-9_]*$/.test(w)));
+      const hit = names.find((n) => SECRET_KEY_RE.test(n));
+      if (hit) {
+        block(`Blocked: \`${hit}\` is a credential-shaped variable and this prints its value.\n` +
+          `Presence only: [ -n "$${hit}" ] && echo "${hit}=set (\${#${hit}} chars)" || echo "${hit}=absent"\n`);
+      }
+    }
+    // A whole-environment dump prints every exported credential. `env` as a command PREFIX
+    // (`env FOO=bar cmd`) runs a command; only a bare `env` / `printenv` (or one piped onward) dumps.
+    if (/^\s*(?:env|printenv)\s*(?:\||$)/.test(seg)) {
+      block('Blocked: a whole-environment dump (env / printenv) prints every exported credential.\n' +
+        'Names only: env | cut -d= -f1. One non-secret variable: printenv NAME. A credential: presence only,\n' +
+        '[ -n "$NAME" ] && echo "NAME=set (${#NAME} chars)" || echo "NAME=absent".\n');
+    }
+
     // A dump verb or a runtime read on a file that HOLDS a credential - judged by content, not path.
     const candidates = [];
     if (DUMP_VERB.test(seg)) for (const tok of seg.split(/\s+/)) if (tok && !tok.startsWith('-') && /[\/.~$]/.test(tok)) candidates.push(tok);

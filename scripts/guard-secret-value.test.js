@@ -110,3 +110,29 @@ test('guard-secret-value: quoting never hides a dump - operators inside quotes d
   assert.equal(bash(`echo 'it'\\''s' && cat ${f.secret}`), 2, 'the shell apostrophe idiom');
   assert.equal(bash(`python3 -c "import json;print(json.load(open('${f.clean}')))"`), 0, 'a clean file through a runtime with ; inside quotes');
 });
+
+test('guard-secret-value: printing a credential-shaped variable is blocked; a length or a test is presence', () => {
+  assert.equal(bash('echo $SENTRY_ACCESS_TOKEN'), 2, 'bare $VAR');
+  assert.equal(bash('echo "${CONTEXT7_API_KEY}"'), 2, 'braced');
+  assert.equal(bash('echo "${DB_PASSWORD:-none}"'), 2, 'with a default');
+  assert.equal(bash("printf '%s\\n' \"$SMTP_SECRET\""), 2, 'printf');
+  assert.equal(bash('printenv SENTRY_ACCESS_TOKEN'), 2, 'printenv NAME');
+  assert.equal(bash('[ -n "$SENTRY_ACCESS_TOKEN" ] && echo "SENTRY_ACCESS_TOKEN=set (${#SENTRY_ACCESS_TOKEN} chars)" || echo "SENTRY_ACCESS_TOKEN=absent"'), 0, 'the presence idiom: a test and a length');
+  assert.equal(bash('echo $PATH'), 0, 'a non-secret variable');
+  assert.equal(bash('echo "$CLAUDE_STACK_DOCS_PATH"'), 0, 'PATH suffix is not a credential');
+  assert.equal(bash('printenv CLAUDE_STACK_INSTRUMENT'), 0, 'printenv of a non-secret');
+  assert.equal(bash('echo "token count: 3"'), 0, 'a word, not a variable');
+});
+
+test('guard-secret-value: a whole-environment dump is blocked unless reduced to names', () => {
+  assert.equal(bash('env'), 2, 'bare env');
+  assert.equal(bash('printenv'), 2, 'bare printenv');
+  assert.equal(bash('env | grep -i sentry'), 2, 'filtered by a prefix still prints the value');
+  assert.equal(bash('env | grep PATH'), 2, 'any value filter prints values - the denial names printenv NAME for a non-secret');
+  assert.equal(bash('env | cut -d= -f1 | sort'), 0, 'names only');
+  assert.equal(bash("env | sed 's/=.*//'"), 0, 'names only, sed form');
+  assert.equal(bash('env | wc -l'), 0, 'a count');
+  assert.equal(bash('env | grep -c SENTRY'), 0, 'a count');
+  assert.equal(bash('env FOO=bar node script.js'), 0, 'env as a command prefix is not a dump');
+  assert.equal(bash('dotenv -e .env -- npm start'), 0, 'a word containing env is not env');
+});
