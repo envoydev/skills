@@ -314,6 +314,14 @@ test('guard-secret-value: a glob and a path held in a shell variable resolve to 
   assert.equal(bash(`cat ${path.join(ROOT, '.claude', 'clean*.json')}`), 0, 'a glob matching only clean files');
 });
 
+test('guard-secret-value: brace expansion is bounded - a pathological pattern costs one capped pass, never the hook timeout', () => {
+  fixtures();
+  const t0 = Date.now();
+  assert.equal(bash(`cat ${ROOT}/${'{a,b}'.repeat(26)}.json`), 0, 'no such file');
+  const ms = Date.now() - t0;
+  assert.ok(ms < 2000, `took ${ms}ms - the brace recursion is unbounded (measured 4.8s at 24 groups before the cap)`);
+});
+
 test('guard-secret-value: a redirect to a terminal device is a dump, not a write into a file', () => {
   const f = fixtures();
   assert.equal(bash(`cat ${f.secret} > /dev/stdout`), 2, '/dev/stdout is the transcript');
@@ -322,6 +330,10 @@ test('guard-secret-value: a redirect to a terminal device is a dump, not a write
   assert.equal(bash(`cat ${f.secret} | tee /dev/stderr | wc -l`), 2, 'a tee stage prints before the reducer');
   assert.equal(bash(`cat ${f.secret} | tee /dev/stderr > /dev/null`), 2, 'the same behind a /dev/null redirect');
   assert.equal(bash(`cat ${f.secret} > ${path.join(f.dir, 'out.txt')}`), 0, 'a real file never reaches the context');
+  assert.equal(bash(`cat ${f.secret} 2>/dev/null`), 2, 'a stderr redirect leaves stdout in the transcript (re-review regression)');
+  assert.equal(bash(`cat ${f.secret} 2>${path.join(f.dir, 'err.log')}`), 2, 'stderr into a file, the same');
+  assert.equal(bash('printenv SENTRY_ACCESS_TOKEN 2>/dev/null'), 2, 'a print verb behind a stderr redirect');
+  assert.equal(bash(`cat ${f.secret} 1>${path.join(f.dir, 'out.txt')}`), 0, 'fd 1 into a file is a write');
 });
 
 test('guard-secret-value: an exemption counts in its own stage only, never in a comment or an argument', () => {
@@ -346,6 +358,8 @@ test('guard-secret-value: only a reduction to names or a count is presence', () 
   assert.equal(bash('echo "$(printenv SENTRY_ACCESS_TOKEN)"'), 2, 'quoted substitution');
   assert.equal(bash('env | cut -d= -f1 | sort'), 0, 'names only');
   assert.equal(bash("env | awk -F= '{print $1}'"), 0, 'awk field 1');
+  assert.equal(bash(`jq -r 'keys[]' ${f.secret}`), 0, 'keys[] is names, one per line');
+  assert.equal(bash(`jq -r '.env | keys[]' ${f.secret}`), 0, 'the same behind a path');
 });
 
 test('guard-secret-value: the dump verbs outside the cat/head list print the same bytes', () => {

@@ -144,26 +144,36 @@ let cwdAnchor = null;
 // The anchors a relative path is tried against. A payload field is attacker-shaped input, not a
 // promise: a non-string `cwd` reached pathMod.join and threw ERR_INVALID_ARG_TYPE, and a hook that
 // exits 1 fails OPEN - the dump it was judging ran (review finding, reproduced with `"cwd": 5`).
-const anchorDirs = () => [cwdAnchor, process.env.CLAUDE_PROJECT_DIR, payload && payload.cwd, process.cwd()]
-  .filter((d) => typeof d === 'string' && d);
+const anchorDirs = () => [...new Set([cwdAnchor, process.env.CLAUDE_PROJECT_DIR, payload && payload.cwd, process.cwd()]
+  .filter((d) => typeof d === 'string' && d))]; // deduped - the project dir and the cwd are usually one directory, listed once
 // The account dir is an anchor only for a segment that SPELLS it (`os.homedir()`, `expanduser('~')`,
 // `$USERPROFILE`) with a bare settings file name - the runtime shape that builds the path at run
 // time and hands the scan no path at all.
 let homeAnchor = false;
 const ACCOUNT_FILE = /^settings(?:\.local)?\.json$/;
 
-// Brace alternatives (`{settings,x}.json`) - one level at a time, no whitespace or quotes inside,
-// which keeps a JSON literal out of the expansion, and capped.
+// Brace alternatives (`{settings,x}.json`) - one group per pass, no whitespace or quotes inside,
+// which keeps a JSON literal out of the expansion. The cap binds the WORKLIST, not just the result:
+// the recursive form capped what it pushed but not what it visited, and 26 groups cost 23s against
+// the hook's 10s timeout, which fails open (re-review). A pass costs at most 20 strings, and the
+// alternatives past the cap are dropped - a 20-way brace is noise, not a path a model types.
+const BRACE_GROUP = /\{([^{}\s"']*,[^{}\s"']*)\}/;
 function expandBraces(p) {
-  const m = p.match(/\{([^{}\s"']*,[^{}\s"']*)\}/);
-  if (!m) return [p];
-  const out = [];
-  for (const alt of m[1].split(',')) {
-    for (const rest of expandBraces(p.slice(0, m.index) + alt + p.slice(m.index + m[0].length))) {
-      if (out.length < 20) out.push(rest);
+  let out = [p];
+  for (;;) {
+    const next = [];
+    let expanded = false;
+    for (const s of out) {
+      const m = s.match(BRACE_GROUP);
+      if (!m) { next.push(s); continue; }
+      expanded = true;
+      for (const alt of m[1].split(',')) {
+        if (next.length < 20) next.push(s.slice(0, m.index) + alt + s.slice(m.index + m[0].length));
+      }
     }
+    out = next;
+    if (!expanded) return out;
   }
-  return out;
 }
 const GLOB_CHARS = /[*?[]/;
 const globToRe = (pat) => new RegExp('^' + pat.replace(/[.+^${}()|\\]/g, '\\$&').replace(/\*/g, '[^/]*').replace(/\?/g, '[^/]') + '$');
@@ -343,7 +353,8 @@ function jqReduces(stage) {
   let filter = null;
   for (const t of shellTokens(stage).slice(1)) { if (t.startsWith('-')) continue; filter = t.replace(/^(['"])([\s\S]*)\1$/, '$2'); break; }
   if (filter == null || filter.includes(',')) return false; // `,` prints both sides
-  return /^(?:keys|keys_unsorted|length|type|has\([^)]*\))$/.test(filter.split('|').pop().trim());
+  // `keys[]` is the same name list one per line - the `-r` idiom for reading names.
+  return /^(?:keys(?:_unsorted)?(?:\[\])?|length|type|has\([^)]*\))$/.test(filter.split('|').pop().trim());
 }
 function isReducer(stage) {
   const s = stage.replace(PREFIX_WORDS, '');
@@ -357,8 +368,10 @@ function isReducer(stage) {
 }
 // A redirect into a FILE never reaches the context - but `/dev/stdout`, `/dev/stderr` and `/dev/tty`
 // ARE the context, and a `tee` stage writing to one prints everything upstream of the reducer.
+// Only STDOUT's redirect (`>` or `1>`) excuses a segment: a `2>/dev/null` moves stderr and leaves
+// the dump on stdout - the `\d?` that accepted it let `cat <file> 2>/dev/null` pass (re-review).
 const TERMINAL_DEV = /^\/dev\/(?:std(?:out|err)|tty|fd\/[12])$/;
-const REDIRECT_RE = /(?:^|\s)\d?>>?\s*([^&\s>|]+)/g;
+const REDIRECT_RE = /(?:^|\s)1?>>?\s*([^&\s>|]+)/g;
 const redirectsToFile = (seg) => [...seg.matchAll(REDIRECT_RE)].some((m) => !TERMINAL_DEV.test(m[1]));
 const teesToTerminal = (stage) => /^tee\b[^|]*?(\/dev\/(?:std(?:out|err)|tty|fd\/[12]))\b/.test(stage.replace(PREFIX_WORDS, ''));
 
