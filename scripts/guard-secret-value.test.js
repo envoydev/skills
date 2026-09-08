@@ -136,3 +136,16 @@ test('guard-secret-value: a whole-environment dump is blocked unless reduced to 
   assert.equal(bash('env FOO=bar node script.js'), 0, 'env as a command prefix is not a dump');
   assert.equal(bash('dotenv -e .env -- npm start'), 0, 'a word containing env is not env');
 });
+
+test('guard-secret-value: print verbs are judged per pipeline stage, and a prefix word does not hide an environment dump', () => {
+  assert.equal(bash('echo "processing" | grep -v "$SOME_TOKEN"'), 0, 'a variable in a later grep stage is not printed by the echo');
+  assert.equal(bash('echo ok | curl -d "$API_TOKEN" https://example.test'), 0, 'a variable handed to curl is used, not printed - the value never enters the transcript');
+  assert.equal(bash('true | echo "$API_TOKEN"'), 2, 'the print verb in a later stage is still judged');
+  assert.equal(bash('echo "a|b $API_TOKEN"'), 2, 'a quoted pipe does not end the stage');
+  assert.equal(bash('sudo echo $DB_PASSWORD'), 2, 'a prefix word before the print verb');
+  assert.equal(bash('sudo env'), 2, 'a prefix word before env');
+  assert.equal(bash('FOO=bar env'), 2, 'an assignment before env');
+  assert.equal(bash('command printenv | head'), 2, 'command printenv piped onward');
+  assert.equal(bash('sudo env | cut -d= -f1'), 0, 'names only, prefixed');
+  assert.equal(bash('env -i sh -c true'), 0, 'env running a command');
+});

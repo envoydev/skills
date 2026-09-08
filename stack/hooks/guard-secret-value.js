@@ -167,34 +167,42 @@ const RUNTIME = /\b(?:node|python3?|perl|ruby|deno|bun|pwsh|powershell)\b/;
 // the read the rule asks for; the segment passes as a whole.
 const PRESENCE_SHAPE = /\bwc\b|\b(?:grep|rg|egrep|fgrep)\s+(?:-\w*[clLq]\b|--count\b|--files-with-matches\b|--quiet\b)|\bjq\b[^\n]*\b(?:keys|length|has\()|\bcut\s+-d\s*=|\bawk\s+-F\s*=|\bsed\s+['"]s\/=\.\*\/\//;
 
-// Segments split on `&&`, `||`, `;` and newline OUTSIDE quotes: a runtime's inline code carries
-// `;` inside its quoted argument (`python3 -c "import json;print(...)"`), and a naive split
-// separated the runtime word from the segment holding the file path, so neither half matched.
-// FAIL SAFE: a quote left open at the end of the command (a typo, a truncated input, a `\` before
-// a closing quote) would otherwise swallow the rest of the command into one blob, where any
-// exemption substring could excuse a real dump (review finding) - so an unbalanced scan falls
-// back to the quote-blind split, which judges every operator-separated piece on its own.
-function splitSegments(cmd) {
-  const segs = [];
+// Split `text` at the separators `sepAt` reports (their length at position i, 0 for none),
+// honouring quotes: an escaped char outside quotes and inside double quotes is skipped, single
+// quotes take no escapes (bash semantics). FAIL SAFE: a quote left open at the end (a typo, a
+// truncated input, a `\` before a closing quote) would otherwise swallow the rest into one piece,
+// where any exemption substring could excuse a real dump (review finding) - so an unbalanced scan
+// falls back to the quote-blind `blind` split, which judges every operator-separated piece.
+function splitOutsideQuotes(text, sepAt, blind) {
+  const parts = [];
   let cur = '';
   let quote = null; // the quote character we are inside, or null
-  for (let i = 0; i < cmd.length; i++) {
-    const ch = cmd[i];
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
     if (quote) {
       cur += ch;
-      if (ch === '\\' && quote === '"' && i + 1 < cmd.length) { cur += cmd[++i]; continue; } // an escaped char inside double quotes
+      if (ch === '\\' && quote === '"' && i + 1 < text.length) { cur += text[++i]; continue; } // an escaped char inside double quotes
       if (ch === quote) quote = null;
       continue;
     }
-    if (ch === '\\' && i + 1 < cmd.length) { cur += ch + cmd[++i]; continue; } // an escaped char outside quotes
+    if (ch === '\\' && i + 1 < text.length) { cur += ch + text[++i]; continue; } // an escaped char outside quotes
     if (ch === '"' || ch === '\'') { quote = ch; cur += ch; continue; }
-    if (ch === '\n' || ch === ';') { segs.push(cur); cur = ''; continue; }
-    if ((ch === '&' || ch === '|') && cmd[i + 1] === ch) { segs.push(cur); cur = ''; i++; continue; }
+    const n = sepAt(text, i);
+    if (n) { parts.push(cur); cur = ''; i += n - 1; continue; }
     cur += ch;
   }
-  segs.push(cur);
-  return quote ? cmd.split(/&&|\|\||;|\n/) : segs;
+  parts.push(cur);
+  return quote ? blind(text) : parts;
 }
+// Segments split on `&&`, `||`, `;` and newline OUTSIDE quotes: a runtime's inline code carries
+// `;` inside its quoted argument (`python3 -c "import json;print(...)"`), and a naive split
+// separated the runtime word from the segment holding the file path, so neither half matched.
+const splitSegments = (cmd) => splitOutsideQuotes(cmd,
+  (t, i) => ((t[i] === '\n' || t[i] === ';') ? 1 : ((t[i] === '&' || t[i] === '|') && t[i + 1] === t[i]) ? 2 : 0),
+  (t) => t.split(/&&|\|\||;|\n/));
+// A segment is a PIPELINE: its stages split on a single `|` (`||` never reaches here - splitSegments
+// consumed it), and a print verb's arguments end at its own stage.
+const splitPipes = (seg) => splitOutsideQuotes(seg, (t, i) => (t[i] === '|' ? 1 : 0), (t) => t.split('|'));
 
 // ---- Bash matcher ----
 if (payload.tool_name === 'Bash') {
@@ -209,9 +217,12 @@ if (payload.tool_name === 'Bash') {
 
     // Printing a credential-shaped VARIABLE: echo / printf with $NAME or ${NAME...}, printenv NAME.
     // `${#NAME}` is a length - the presence idiom - and `[ -n "$NAME" ]` is a test, so only the
-    // arguments of a PRINT verb are judged.
-    const pr = seg.match(/(?:^|[\s(])(echo|printf|printenv)\b([^\n]*)/);
-    if (pr) {
+    // arguments of a PRINT verb are judged - and only within the verb's own pipeline STAGE: a
+    // variable in a later `grep -v "$X"` stage is not printed, and a `curl -d "$TOKEN"` stage is a
+    // use, not a print (the value never enters the transcript).
+    for (const stage of splitPipes(seg)) {
+      const pr = stage.match(/(?:^|[\s(])(echo|printf|printenv)\b([^\n]*)/);
+      if (!pr) continue;
       const names = [...pr[2].matchAll(/\$\{?(?!#)([A-Za-z_][A-Za-z0-9_]*)/g)].map((m) => m[1]);
       if (pr[1] === 'printenv') names.push(...pr[2].trim().split(/\s+/).filter((w) => /^[A-Za-z_][A-Za-z0-9_]*$/.test(w)));
       const hit = names.find((n) => SECRET_KEY_RE.test(n));
@@ -221,8 +232,9 @@ if (payload.tool_name === 'Bash') {
       }
     }
     // A whole-environment dump prints every exported credential. `env` as a command PREFIX
-    // (`env FOO=bar cmd`) runs a command; only a bare `env` / `printenv` (or one piped onward) dumps.
-    if (/^\s*(?:env|printenv)\s*(?:\||$)/.test(seg)) {
+    // (`env FOO=bar cmd`) runs a command; only a bare `env` / `printenv` (or one piped onward) dumps -
+    // and a prefix word of its own (`sudo env`, `command printenv`, `FOO=bar env`) changes nothing.
+    if (/^\s*(?:(?:sudo|command|nice|time|exec|builtin|nohup|\w+=\S*)\s+)*(?:env|printenv)\s*(?:\||$)/.test(seg)) {
       block('Blocked: a whole-environment dump (env / printenv) prints every exported credential.\n' +
         'Names only: env | cut -d= -f1. One non-secret variable: printenv NAME. A credential: presence only,\n' +
         '[ -n "$NAME" ] && echo "NAME=set (${#NAME} chars)" || echo "NAME=absent".\n');
