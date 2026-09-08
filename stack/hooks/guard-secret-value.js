@@ -63,7 +63,7 @@ function secretIn(file) {
   let text;
   try {
     if (fs.statSync(file).size > MAX_BYTES) return null;
-    text = fs.readFileSync(file, 'utf8').replace(/^﻿/, '');
+    text = fs.readFileSync(file, 'utf8').replace(/^\uFEFF/, '');
   } catch { return null; }
   try { return secretKeyIn(JSON.parse(text), '', 0); } catch { /* not JSON */ }
   const first = text.split('\n').find((l) => l.trim() && !l.trim().startsWith('#')) || '';
@@ -171,12 +171,12 @@ const PRESENCE_SHAPE = /\bwc\b|\b(?:grep|rg|egrep|fgrep)\s+(?:-\w*[clLq]\b|--cou
 if (payload.tool_name === 'Bash') {
   const raw = String(input.command || '');
   const command = stripHeredocsOf(raw);
-  // The sanctioned read is exempt by name - it is this file.
-  if (/guard-secret-value\.js["']?\s+--presence\b/.test(command)) process.exit(0);
   for (const seg of command.split(/&&|\|\||;|\n/)) {
     if (/\s>>?\s*[^&\s>]/.test(seg)) continue; // output into a file never reaches the context
     if (PRESENCE_SHAPE.test(seg)) continue;
     if (/\bsed\s+(?:-\w*i|--in-place)\b/.test(seg)) continue; // an edit, not a dump
+    // The sanctioned read is exempt by name - it is this file.
+    if (/guard-secret-value\.js["']?\s+--presence\b/.test(seg)) continue;
 
     // A dump verb or a runtime read on a file that HOLDS a credential - judged by content, not path.
     const candidates = [];

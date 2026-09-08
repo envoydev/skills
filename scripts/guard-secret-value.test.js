@@ -82,3 +82,9 @@ test('guard-secret-value: copies, in-place edits, presence-shaped pipelines and 
   assert.equal(bash(`cat ${f.secret} | wc -l`), 0, 'a line count is presence');
   assert.equal(bash('cat "$SOME_UNSET_DIR/settings.json"'), 0, 'an unexpanded variable is never judged');
 });
+
+test('guard-secret-value: the --presence exemption covers its own segment only', () => {
+  const f = fixtures();
+  assert.equal(bash(`node "${HOOK}" --presence "${f.secret}" SENTRY_ACCESS_TOKEN`), 0, 'the accessor alone');
+  assert.equal(bash(`true && node "${HOOK}" --presence "${f.secret}" && cat ${f.secret}`), 2, 'a dump chained after the accessor is still a dump');
+});
