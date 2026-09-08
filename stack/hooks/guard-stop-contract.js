@@ -310,6 +310,29 @@ function secretInToolResults() {
   }
 }
 
+// The secret guard's receipt is the user's CONSENT to a value being in this transcript - the remote
+// user who asked to see it, or to have it placed where a blind copy cannot reach. A shape that
+// entered under a live receipt is not re-asked for rotation every turn; the receipt is read with
+// the same session scope the guard applies (under 8h, this session's own transcript). Its path is
+// pinned in shared-rules.json with the guard's.
+function secretReadAllowed() {
+  try {
+    const path = require('path');
+    const root = process.env.CLAUDE_PROJECT_DIR || payload.cwd || process.cwd();
+    const receipt = path.resolve(root, docsRootEnv(), 'flow', 'SECRET-READ-ALLOW');
+    const st = fs.statSync(receipt);
+    let sessionStartMs = 0;
+    try {
+      const t = fs.statSync(String(payload.transcript_path || ''));
+      sessionStartMs = t.birthtimeMs && t.birthtimeMs !== t.ctimeMs ? t.birthtimeMs : 0;
+    } catch { sessionStartMs = 0; }
+    if (Date.now() - st.mtimeMs > 8 * 60 * 60 * 1000 || (sessionStartMs && st.mtimeMs < sessionStartMs)) return false;
+    return fs.readFileSync(receipt, 'utf8').split(/\r?\n/).some((l) => l.trim() && !l.trim().startsWith('#'));
+  } catch {
+    return false; // absent or unreadable - no consent recorded
+  }
+}
+
 // A silent fail-open is indistinguishable from a clean turn, which is how the misses above
 // stayed invisible across 74 audited bundles. Every path that declines to judge says so.
 function breadcrumb(why) {
@@ -364,7 +387,7 @@ if (payload.hook_event_name === 'Stop') {
   // A live credential that has entered this session outranks every other close: it cannot be
   // undone by a later turn, and the transcript keeps the value whatever happens next. This branch
   // runs FIRST and fires on a clean close too - three measured exposures ended exactly there.
-  if (!askJustAnswered() && (ROTATE_RE.test(prose) || secretInToolResults())) {
+  if (!askJustAnswered() && (ROTATE_RE.test(prose) || (secretInToolResults() && !secretReadAllowed()))) {
     process.stderr.write(
       'A credential appears to have entered this session - either named for rotation in this\n' +
       'turn, or matched by shape in a tool result. Measured seven times in the audited corpus:\n' +

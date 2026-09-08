@@ -3056,6 +3056,27 @@
         }
       ]
     },
+    "secret-read-allow-receipt": {
+      "_note": "The secret guard's block ends in ONE AskUserQuestion (presence only - recommended / show or use the value this session / drop), and the 'show' answer is honoured through a receipt at <docs-path>/flow/SECRET-READ-ALLOW - a file path, a variable NAME or `*`, this session's own, under 8h. The guard owns the path (it resolves and reads the file); the stop contract reads the same file so a consented exposure is not re-asked for rotation; the security baseline and CLAUDE.md name it. A rename in one place leaves the model writing a receipt nothing reads.",
+      "owner": {
+        "file": "stack/hooks/guard-secret-value.js",
+        "marker": "'flow', 'SECRET-READ-ALLOW'"
+      },
+      "sites": [
+        {
+          "file": "stack/hooks/guard-stop-contract.js",
+          "marker": "'flow', 'SECRET-READ-ALLOW'"
+        },
+        {
+          "file": "stack/rules/baseline-security.md",
+          "marker": "`<docs-path>/flow/SECRET-READ-ALLOW` receipt"
+        },
+        {
+          "file": "CLAUDE.md",
+          "marker": "`<docs-path>/flow/SECRET-READ-ALLOW` receipt"
+        }
+      ]
+    },
     "cross-write-allow-receipt": {
       "_note": "The cross-project write guard's block ends in ONE AskUserQuestion (task card - recommended / allow that tree for this session / drop), and the 'allow' answer is honoured through a receipt at <docs-path>/flow/CROSS-WRITE-ALLOW - one root per line, this session's own, under 8h, a root containing the project dropped. The hook owns the path (it resolves and reads the file); the two always-on rules that describe the ask name the same path. A rename in one place leaves the model writing a receipt the guard never reads.",
       "owner": {
