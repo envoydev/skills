@@ -125,6 +125,28 @@ test('guard-stop-contract: a suggestion close that says nothing is pending on th
   assert.equal(run('guard-stop-contract.js', { hook_event_name: 'Stop', transcript_path: bare }), 2, 'the same card without the line is the measured stall');
 });
 
+test('guard-stop-contract: a credential shape in a tool result demands the rotate ask - unless the user allowed the read this session', () => {
+  // The secret guard's receipt is the user's consent to the value being in the transcript; without
+  // honouring it here, every turn after a consented read ended in 'Rotate it now?'.
+  const root = fs.mkdtempSync(path.join(TMP, 'projS-'));
+  const shape = 'ghp_' + 'A'.repeat(24); // fake by construction - the SHAPE is what the contract reads
+  const tp = transcript('leak', [
+    { type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 't9', content: `TOKEN=${shape}` }] } },
+    assistantRow('m9', 'Copied the token into .env as asked; all tests green.'),
+  ]);
+  const stop = () => runIn('guard-stop-contract.js', { hook_event_name: 'Stop', transcript_path: tp },
+    { env: { ...process.env, CLAUDE_PROJECT_DIR: root, CLAUDE_STACK_DOCS_PATH: '.claude/docs' } });
+  const r = stop();
+  assert.equal(r.status, 2, 'a shape in a tool result with no consent');
+  assert.match(r.stderr, /Rotate it now/);
+  const receipt = path.join(root, '.claude', 'docs', 'flow', 'SECRET-READ-ALLOW');
+  fs.mkdirSync(path.dirname(receipt), { recursive: true });
+  fs.writeFileSync(receipt, '*\n');
+  assert.equal(stop().status, 0, 'the consented exposure is not re-asked');
+  const old = (Date.now() - 9 * 3600 * 1000) / 1000; fs.utimesSync(receipt, old, old);
+  assert.equal(stop().status, 2, 'a stale receipt is no consent');
+});
+
 test('guard-stop-contract: one turn split across rows sharing a message.id is judged whole', () => {
   // The defect this pins: keeping only the LAST row read a thinking-only fragment as the turn and
   // passed a real decision stop - measured in six audited sessions.

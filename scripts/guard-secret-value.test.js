@@ -383,3 +383,46 @@ test('guard-secret-value: the dump verbs outside the cat/head list print the sam
   assert.equal(bash(`while read l; do echo "$l"; done < ${f.secret}`), 2, 'a read loop over the file');
   assert.equal(bash(`cp ${f.secret} ${path.join(f.dir, 'settings.bak')}`), 0, 'a backup is not a dump');
 });
+
+test("guard-secret-value: a block ends in an ask, and the user's allow is honoured through a session receipt", () => {
+  // Remote use: the user cannot run the copy-ready command in their own terminal, so a bare denial
+  // took the decision away from them. The denial now mandates ONE AskUserQuestion, and the 'show or
+  // use' answer is a receipt this guard reads - a file, a variable NAME or `*`, this session only.
+  const f = fixtures();
+  const receipt = path.join(LEDGER, 'flow', 'SECRET-READ-ALLOW');
+  fs.mkdirSync(path.dirname(receipt), { recursive: true });
+  try {
+    const denied = run({ tool_name: 'Bash', tool_input: { command: `cat ${f.secret}` }, session_id: 'suite' });
+    assert.equal(denied.status, 2);
+    assert.match(denied.stderr, /ONE AskUserQuestion/, 'the denial mandates the ask');
+    assert.match(denied.stderr, /Presence only \(Recommended\)/, 'presence is the recommended option');
+    assert.match(denied.stderr, /flow[\\/]SECRET-READ-ALLOW/, 'the denial names the receipt');
+    assert.doesNotMatch(denied.stderr, /stale/, 'no receipt, no staleness talk');
+    const deniedVar = run({ tool_name: 'Bash', tool_input: { command: 'echo $SENTRY_ACCESS_TOKEN' }, session_id: 'suite' });
+    assert.match(deniedVar.stderr, /ONE AskUserQuestion/, 'the variable denial carries the ask too');
+    // a file entry opens that file - by any dump verb and by Read - and nothing else
+    fs.writeFileSync(receipt, `# allowed by the user in this session\n${f.secret}\n`);
+    assert.equal(bash(`cat ${f.secret}`), 0, 'the listed file');
+    assert.equal(bash(`jq -r .env.SENTRY_ACCESS_TOKEN ${f.secret}`), 0, 'any dump verb');
+    assert.equal(read(f.secret), 0, 'and the Read tool');
+    assert.equal(bash(`cat ${f.dotenv}`), 2, 'an unlisted file stays blocked');
+    assert.equal(bash('echo $SENTRY_ACCESS_TOKEN'), 2, 'a file entry is not a variable');
+    // a NAME entry opens that variable's print
+    fs.writeFileSync(receipt, 'SENTRY_ACCESS_TOKEN\n');
+    assert.equal(bash('echo $SENTRY_ACCESS_TOKEN'), 0, 'the listed variable');
+    assert.equal(bash('echo $API_KEY'), 2, 'another variable stays blocked');
+    assert.equal(bash('env'), 2, 'a whole-environment dump is not one variable');
+    // `*` opens everything for the session - the remote user's 'just do the work'
+    fs.writeFileSync(receipt, '*\n');
+    assert.equal(bash(`cat ${f.dotenv}`), 0, 'any file');
+    assert.equal(bash('env'), 0, 'the environment');
+    assert.equal(bash(`echo 'TOKEN=${'ghp_' + 'A'.repeat(24)}' >> ${path.join(f.dir, '.env')}`), 0, 'a literal placed into a file');
+    // stale: older than 8h reads as absent, and the denial says so
+    const old = (Date.now() - 9 * 3600 * 1000) / 1000; fs.utimesSync(receipt, old, old);
+    const aged = run({ tool_name: 'Bash', tool_input: { command: `cat ${f.secret}` }, session_id: 'suite' });
+    assert.equal(aged.status, 2, 'a 9h-old receipt is absent');
+    assert.match(aged.stderr, /stale/, 'and the denial says so');
+  } finally {
+    fs.rmSync(receipt, { force: true });
+  }
+});
